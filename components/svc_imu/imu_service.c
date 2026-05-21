@@ -3,29 +3,25 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "kalman_filter.h"
+#include "driver/pulse_cnt.h"
 #include <math.h>
 #include <string.h>
 
 static const char *TAG = "IMU_SERVICE";
 static TaskHandle_t imu_task_handle = NULL;
+static pcnt_unit_handle_t pcnt_unit = NULL;
 static kalman_t kal_roll, kal_pitch;
 static float last_roll = 0, last_pitch = 0;
 static imu_window_t imu_win;
 
 #define RAD_TO_DEG 57.2957795131f
 
-// ISR Handler - Chỉ gác cổng, không xử lý nặng
-static void IRAM_ATTR imu_isr_handler(void *arg)
+// Callback từ PCNT - Chỉ gọi khi đã đếm đủ IMU_BATCH_SIZE mẫu
+static bool IRAM_ATTR pcnt_on_reach(pcnt_unit_handle_t unit, const pcnt_watch_event_data_t *edata, void *user_ctx)
 {
-    static uint32_t count_pkg = 0;
-    if (++count_pkg >= IMU_BATCH_SIZE) {
-        count_pkg = 0;
-        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-        vTaskNotifyGiveFromISR(imu_task_handle, &xHigherPriorityTaskWoken);
-        if (xHigherPriorityTaskWoken) {
-            portYIELD_FROM_ISR();
-        }
-    }
+    BaseType_t high_task_wakeup = pdFALSE;
+    vTaskNotifyGiveFromISR(imu_task_handle, &high_task_wakeup);
+    return high_task_wakeup == pdTRUE;
 }
 
 // Task xử lý dữ liệu chính
@@ -122,20 +118,48 @@ esp_err_t imu_service_init(gpio_num_t int_pin)
     // 2. Tạo Task xử lý (độ ưu tiên cao)
     xTaskCreate(imu_processing_task, "imu_task", 4096, NULL, 10, &imu_task_handle);
 
-    // 3. Cấu hình GPIO cho ngắt
-    gpio_config_t io_conf = {
-        .intr_type = GPIO_INTR_NEGEDGE,
-        .pin_bit_mask = (1ULL << int_pin),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
+    // 3. Cấu hình PCNT để đếm xung từ chân INT của IMU
+    // Việc này giúp CPU không phải thức dậy cho mỗi mẫu dữ liệu, 
+    // mà chỉ thức dậy khi đủ một Batch (ví dụ 50 mẫu).
+    pcnt_unit_config_t unit_config = {
+        .high_limit = IMU_BATCH_SIZE,
+        .low_limit = -1,
     };
-    gpio_config(&io_conf);
+    ESP_ERROR_CHECK(pcnt_new_unit(&unit_config, &pcnt_unit));
 
-    // 4. Cài đặt ISR
-    gpio_install_isr_service(0);
-    gpio_isr_handler_add(int_pin, imu_isr_handler, NULL);
+    // Lọc nhiễu (Glitch filter) - tránh đếm sai do nhiễu đường truyền
+    pcnt_glitch_filter_config_t filter_config = {
+        .max_glitch_ns = 1000,
+    };
+    ESP_ERROR_CHECK(pcnt_unit_set_glitch_filter(pcnt_unit, &filter_config));
 
-    ESP_LOGI(TAG, "IMU Service initialized on GPIO %d", int_pin);
+    pcnt_chan_config_t chan_config = {
+        .edge_gpio_num = int_pin,
+        .level_gpio_num = -1, // Không dùng level control
+    };
+    pcnt_channel_handle_t pcnt_chan = NULL;
+    ESP_ERROR_CHECK(pcnt_new_channel(pcnt_unit, &chan_config, &pcnt_chan));
+
+    // Thiết lập hành động khi có cạnh xuống (Falling Edge - giống GPIO_INTR_NEGEDGE)
+    // Cạnh lên: Không làm gì (HOLD)
+    // Cạnh xuống: Tăng bộ đếm (INCREASE)
+    ESP_ERROR_CHECK(pcnt_channel_set_edge_action(pcnt_chan, PCNT_CHANNEL_EDGE_ACTION_HOLD, PCNT_CHANNEL_EDGE_ACTION_INCREASE));
+
+    // Đặt điểm quan sát (Watch Point) tại IMU_BATCH_SIZE để kích hoạt ngắt
+    ESP_ERROR_CHECK(pcnt_unit_add_watch_point(pcnt_unit, IMU_BATCH_SIZE));
+
+    // Đăng ký callback khi đạt đến Watch Point
+    pcnt_event_callbacks_t cbs = {
+        .on_reach = pcnt_on_reach,
+    };
+    ESP_ERROR_CHECK(pcnt_unit_register_event_callbacks(pcnt_unit, &cbs, NULL));
+
+    // Kích hoạt và chạy bộ đếm
+    ESP_ERROR_CHECK(pcnt_unit_enable(pcnt_unit));
+    ESP_ERROR_CHECK(pcnt_unit_clear_count(pcnt_unit));
+    ESP_ERROR_CHECK(pcnt_unit_start(pcnt_unit));
+
+    ESP_LOGI(TAG, "IMU Service initialized with PCNT on GPIO %d (Batch: %d)", int_pin, IMU_BATCH_SIZE);
     return ESP_OK;
 }
 
