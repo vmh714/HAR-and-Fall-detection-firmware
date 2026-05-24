@@ -6,6 +6,8 @@
 #include "driver/pulse_cnt.h"
 #include <math.h>
 #include <string.h>
+#include "sys_manager.h"
+#include "esp_event.h"
 
 static const char *TAG = "IMU_SERVICE";
 static TaskHandle_t imu_task_handle = NULL;
@@ -13,6 +15,8 @@ static pcnt_unit_handle_t pcnt_unit = NULL;
 static kalman_t kal_roll, kal_pitch;
 static float last_roll = 0, last_pitch = 0;
 static imu_window_t imu_win;
+static imu_batch_data_t s_batch_data;
+static imu_batch_callback_t s_batch_callback = NULL;
 
 #define RAD_TO_DEG 57.2957795131f
 
@@ -36,12 +40,22 @@ static void imu_processing_task(void *pvParameters)
     float dt = 1.0f / (float)sample_rate;
 
     while (1) {
-        // Đợi thông báo từ ngắt (mỗi 10ms - Data Ready)
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        // Đợi thông báo từ ngắt (mỗi ~500ms - đếm đủ 50 mẫu) với timeout 1 giây để chống kẹt
+        uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
+        if (notified == 0) {
+            ESP_LOGW(TAG, "Timeout waiting for PCNT interrupt. Possible MPU6050 FIFO/INT hang. Recovering...");
+            mpu6050_reset_fifo();
+            pcnt_unit_clear_count(pcnt_unit);
+            continue;
+        }
 
         count = IMU_BATCH_SIZE;
         // Đọc dữ liệu từ FIFO (Burst Read)
         if (mpu6050_read_fifo(raw_data, &count) == ESP_OK && count > 0) {
+            bool is_streaming = (sys_manager_get_state() == STATE_STREAMING);
+            if (!is_streaming) {
+                s_batch_data.count = 0;
+            }
             
             for (int i = 0; i < count; i++) {
                 // Chuyển đổi Raw -> Float (Sử dụng SSF mặc định/hiện tại)
@@ -65,10 +79,10 @@ static void imu_processing_task(void *pvParameters)
                 float accel_pitch = atan2(-ax_body, sqrt(ay_body * ay_body + az_body * az_body)) * RAD_TO_DEG;
                 
                 if (fabsf(accel_pitch) > 75.0f) {
-    kal_roll.R_measure = 2.0f;   // Tăng mạnh: bỏ qua noise Roll accel
-} else {
-    kal_roll.R_measure = 0.05f;  // Bình thường
-}
+                    kal_roll.R_measure = 2.0f;   // Tăng mạnh: bỏ qua noise Roll accel
+                } else {
+                    kal_roll.R_measure = 0.05f;  // Bình thường
+                }
                 // Lọc Kalman đã được đồng bộ dấu 
                 last_roll = kalman_get_angle(&kal_roll, accel_roll, gx_body, dt);
                 last_pitch = kalman_get_angle(&kal_pitch, accel_pitch, gy_body, dt);
@@ -77,10 +91,34 @@ static void imu_processing_task(void *pvParameters)
                 imu_win.roll[imu_win.head] = last_roll;
                 imu_win.pitch[imu_win.head] = last_pitch;
                 imu_win.head = (imu_win.head + 1) % IMU_WINDOW_SIZE;
+
+                // Nếu đang stream, copy data vào batch
+                if (is_streaming && s_batch_data.count < IMU_BATCH_SIZE) {
+                    s_batch_data.data[s_batch_data.count].ax = raw_data[i].ax;
+                    s_batch_data.data[s_batch_data.count].ay = raw_data[i].ay;
+                    s_batch_data.data[s_batch_data.count].az = raw_data[i].az;
+                    s_batch_data.data[s_batch_data.count].gx = raw_data[i].gx;
+                    s_batch_data.data[s_batch_data.count].gy = raw_data[i].gy;
+                    s_batch_data.data[s_batch_data.count].gz = raw_data[i].gz;
+                    s_batch_data.count++;
+                }
+            }
+
+            if (is_streaming && s_batch_data.count >= IMU_BATCH_SIZE) {
+                ESP_LOGI(TAG, "Batch ready (%d samples). Enqueuing via callback.", s_batch_data.count);
+                if (s_batch_callback != NULL) {
+                    esp_err_t err = s_batch_callback(&s_batch_data);
+                    if (err != ESP_OK) {
+                        ESP_LOGW(TAG, "Failed to enqueue IMU batch: %s", esp_err_to_name(err));
+                    }
+                } else {
+                    ESP_LOGW(TAG, "No batch callback registered!");
+                }
+                s_batch_data.count = 0;
             }
 
             // In log mỗi khi xử lý xong một batch (0.5s)
-            //ESP_LOGI(TAG, "Batch processed: %d samples. Current Roll: %.2f, Pitch: %.2f", ount, last_roll, last_pitch);
+            //ESP_LOGI(TAG, "Batch processed: %d samples. Current Roll: %.2f, Pitch: %.2f", count, last_roll, last_pitch);
         }
     }
 }
@@ -167,4 +205,9 @@ void imu_service_get_latest_angles(float *roll, float *pitch)
 {
     *roll = last_roll;
     *pitch = last_pitch;
+}
+
+void imu_service_register_batch_callback(imu_batch_callback_t cb)
+{
+    s_batch_callback = cb;
 }

@@ -1,3 +1,3 @@
-idf_component_register(SRCS "wifi_mqtt_service.c"
+idf_component_register(SRCS "svc_network.c"
                     INCLUDE_DIRS "include"
-                    REQUIRES mqtt esp_wifi nvs_flash esp_event esp_netif sys_manager)
+                    REQUIRES esp_wifi nvs_flash esp_event esp_netif sys_manager)

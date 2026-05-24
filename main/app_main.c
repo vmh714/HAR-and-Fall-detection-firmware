@@ -7,40 +7,33 @@
 #include "esp_netif.h"
 
 // Component headers
+#include "hardware_config.h"
 #include "sys_manager.h"
+#include "svc_network.h"
+#include "svc_cloud.h"
+#include "driver/i2c_master.h"
+#include "mpu6050.h"
+#include "imu_service.h"
 
 static const char *TAG = "MAIN_APP";
 
-// ======================== PHASE 1 TEST CODE ========================
-// Task giả lập các service phát sự kiện (Mạng kết nối, MQTT kết nối...)
-static void test_fsm_task(void *pvParameters) {
-    ESP_LOGW("TEST_FSM", "Waiting 3 seconds before simulating network connect...");
-    vTaskDelay(pdMS_TO_TICKS(3000));
+// ======================== PHASE 2 TEST CODE ========================
+// Task giả lập các lệnh điều khiển từ xa sau khi đã kết nối
+// static void test_fsm_task(void *pvParameters) {
+//     ESP_LOGW("TEST_FSM", "Waiting 20 seconds before simulating START STREAM command...");
+//     vTaskDelay(pdMS_TO_TICKS(20000));
     
-    ESP_LOGW("TEST_FSM", "Simulating Network Connected Event...");
-    esp_event_post(NET_EVENT, NET_EVT_WIFI_CONNECTED, NULL, 0, portMAX_DELAY);
+//     ESP_LOGW("TEST_FSM", "Simulating Cloud Start Stream Command...");
+//     esp_event_post(CLOUD_EVENT, CLOUD_CMD_START_STREAM, NULL, 0, portMAX_DELAY);
     
-    vTaskDelay(pdMS_TO_TICKS(2000));
+//     vTaskDelay(pdMS_TO_TICKS(10000));
     
-    ESP_LOGW("TEST_FSM", "Simulating Cloud MQTT Connected Event...");
-    esp_event_post(CLOUD_EVENT, CLOUD_EVT_MQTT_CONNECTED, NULL, 0, portMAX_DELAY);
+//     ESP_LOGW("TEST_FSM", "Simulating Cloud Stop Stream Command...");
+//     esp_event_post(CLOUD_EVENT, CLOUD_CMD_STOP_STREAM, NULL, 0, portMAX_DELAY);
 
-    vTaskDelete(NULL);
-}
-
-// Event Handler nhận sự kiện và đổi State tương ứng
-static void fsm_test_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
-    if (event_base == NET_EVENT && event_id == NET_EVT_WIFI_CONNECTED) {
-        ESP_LOGI("EVENT_HANDLER", "Received NET_EVT_WIFI_CONNECTED. Transitioning to STATE_CONNECTING...");
-        sys_manager_set_state(STATE_CONNECTING);
-    } 
-    else if (event_base == CLOUD_EVENT && event_id == CLOUD_EVT_MQTT_CONNECTED) {
-        ESP_LOGI("EVENT_HANDLER", "Received CLOUD_EVT_MQTT_CONNECTED. Transitioning to STATE_NORMAL...");
-        sys_manager_set_state(STATE_NORMAL);
-    }
-}
+//     vTaskDelete(NULL);
+// }
 // ====================================================================
-
 
 // ======================== APP MAIN ========================
 void app_main(void)
@@ -59,19 +52,54 @@ void app_main(void)
 
     // 2. Khởi tạo FSM Trung tâm (Event Loop)
     sys_manager_init();
-    
-    // Đăng ký Event Handler để test (Thực tế logic này sẽ nằm trong svc_network / svc_cloud)
-    esp_event_handler_register(NET_EVENT, ESP_EVENT_ANY_ID, &fsm_test_event_handler, NULL);
-    esp_event_handler_register(CLOUD_EVENT, ESP_EVENT_ANY_ID, &fsm_test_event_handler, NULL);
 
-    // 3. Khởi tạo các Service (Chưa implement, tạm thời để comment)
-    // svc_network_init();
-    // svc_cloud_init();
-    // svc_imu_init();
-    // svc_ai_init();
+    // 3. Khởi tạo các Service thực tế cho Mạng và Cloud
+    ESP_LOGI(TAG, "Initializing Network Service...");
+    svc_network_init(CONFIG_WIFI_SSID, CONFIG_WIFI_PASSWORD);
+
+    ESP_LOGI(TAG, "Initializing Cloud Service...");
+    svc_cloud_init(CONFIG_MQTT_BROKER_URI, CONFIG_DEVICE_ID, CONFIG_MQTT_USERNAME, CONFIG_MQTT_PASSWORD);
+
+    ESP_LOGI(TAG, "Initializing I2C and MPU6050...");
+    i2c_master_bus_config_t bus_cfg = {
+        .i2c_port = I2C_PORT,
+        .sda_io_num = I2C_MASTER_SDA_IO,
+        .scl_io_num = I2C_MASTER_SCL_IO,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
+    };
+    i2c_master_bus_handle_t bus_handle;
+    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus_handle));
+    mpu6050_init(bus_handle);
+
+    mpu6050_config_t my_cfg = {
+        .accel_fs = ACCEL_FS_8G,
+        .gyro_fs = GYRO_FS_500DPS,
+        .dlpf_cfg = DLPF_CFG_21HZ,
+        .sample_rate_hz = 100, // 100Hz
+        .pwr_cfg = { .temp_disable = true },
+        .int_cfg = {
+            .data_ready_en = true,
+            .active_low = true,
+            .latch_en = false,
+        },
+        .fifo_cfg = {
+            .fifo_enable = true,
+            .accel_fifo_en = true,
+            .gyro_fifo_en = true,
+            .temp_fifo_en = false,
+        }
+    };
+    mpu6050_config(&my_cfg);
+    mpu6050_calibrate_gyro();
+
+    ESP_LOGI(TAG, "Initializing IMU Service...");
+    imu_service_init(MPU6050_INT_PIN);
+    imu_service_register_batch_callback(svc_cloud_enqueue_imu_batch);
 
     ESP_LOGI(TAG, "System Skeleton Initialized. Main thread yields.");
 
-    // Chạy Task test giả lập sự kiện
-    xTaskCreate(test_fsm_task, "test_fsm_task", 2048, NULL, 5, NULL);
+    // Chạy Task test giả lập lệnh điều khiển FSM
+    //xTaskCreate(test_fsm_task, "test_fsm_task", 2048, NULL, 5, NULL);
 }

@@ -83,7 +83,7 @@ CLOUD_CMD_START_STREAM      // Lệnh từ server yêu cầu bật stream IMU ra
 CLOUD_CMD_STOP_STREAM       // Lệnh từ server yêu cầu tắt stream IMU raw
 
 // IMU_EVENT
-IMU_EVT_BATCH_READY         // Đã gom đủ 50 mẫu IMU raw
+IMU_EVT_BATCH_READY         // [DEPRECATED trong Phase 3 - Đã chuyển sang FreeRTOS Queue để tránh nghẽn Event Loop]
 IMU_EVT_WINDOW_READY        // Đã cập nhật xong sliding window 100 mẫu
 
 // AI_EVENT

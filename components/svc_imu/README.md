@@ -24,7 +24,7 @@
     ├─▶ Ánh xạ hệ trục tọa độ FLU (Body Frame)
     ├─▶ Tính góc nghiêng Roll/Pitch và đẩy qua bộ lọc Kalman 1D
     ├─▶ Cập nhật vào Bộ đệm vòng Cửa sổ trượt (Sliding Window 100 mẫu)
-    └─▶ Phát sự kiện IMU_EVT_BATCH_READY ra Event Loop trung tâm
+    └─▶ Gọi Callback đăng ký (được nạp từ app_main.c) ➔ Gửi batch thô sang Cloud Queue
 ```
 
 ### 1.1 Tối ưu hóa năng lượng với PCNT (Hardware Offloading)
@@ -33,6 +33,12 @@
 * **PCNT** sẽ tự động đếm các xung ngắt này ở mức phần cứng mà không cần bất kỳ sự can thiệp nào của CPU (CPU có thể ngủ hoàn toàn).
 * CPU chỉ bị đánh thức (tạo ngắt) khi PCNT đếm đủ số lượng mẫu quy định (ví dụ: `IMU_BATCH_SIZE = 50` xung). Khi ngắt PCNT xảy ra, `imu_processing_task` mới được thông báo để thức dậy và tiến hành Burst Read một mạch toàn bộ dữ liệu từ FIFO của MPU6050.
 * **Lợi ích cốt lõi**: Giảm đến 98% số lần đánh thức CPU và context switch, giúp tăng đáng kể thời lượng pin cho thiết bị đeo (wearable) trong khi vẫn đảm bảo thu thập đầy đủ 100% dữ liệu cảm biến.
+
+### 1.2 Cơ chế Watchdog ngắt & Tự động phục hồi cảm biến (Self-Healing)
+Trong thực tế, khi cảm biến MPU6050 hoạt động ở tần suất cao, bộ đệm FIFO có thể bị tràn hoặc ngắt tín hiệu vật lý INT bị treo mức logic (mất cạnh sườn), làm PCNT ngừng đếm và CPU bị khóa luồng IMU vĩnh viễn. Để khắc phục:
+* Thay vì đợi ngắt vô hạn (`portMAX_DELAY`), task IMU sử dụng cấu hình chờ tối đa **1 giây (1000ms)**.
+* Khi phát hiện quá thời gian (timeout) mà không nhận được thông báo từ PCNT, hệ thống sẽ tự động kích hoạt tiến trình giải phóng cảm biến: gọi `mpu6050_reset_fifo()` để xóa bộ đệm của MPU6050 và `pcnt_unit_clear_count()` để làm sạch bộ đếm PCNT.
+* Tiến trình tự chữa lành (Self-Healing) này giúp firmware tự giải phóng và tiếp tục hoạt động trơn tru mà không cần nút nhấn reset cứng.
 
 
 ---
@@ -68,22 +74,34 @@ void imu_service_get_latest_angles(float *roll, float *pitch);
 ```
 Đọc nhanh giá trị Roll và Pitch sau khi lọc Kalman tại thời điểm hiện tại. An toàn khi gọi từ các task khác nhờ cơ chế bảo vệ mutex/volatile nội bộ.
 
+### 3.3 Đăng ký Callback xử lý Batch (Tránh Circular Dependency)
+```c
+typedef esp_err_t (*imu_batch_callback_t)(const void *batch_data);
+void imu_service_register_batch_callback(imu_batch_callback_t cb);
+```
+* **Mô tả**: Đăng ký một con trỏ hàm callback (nhận gói dữ liệu IMU batch) để chuyển dữ liệu trực tiếp sang tầng Cloud Queue.
+* **Tầm quan trọng**: Giúp `svc_imu` hoàn toàn decoupled khỏi `svc_cloud` (không cần include header chéo), giải quyết triệt để vấn đề phụ thuộc vòng tròn trong hệ thống build CMake của ESP-IDF.
+
 ---
 
 ## 4. VÍ DỤ TÍCH HỢP HỆ THỐNG
 
-### 4.1 Khởi tạo trong app_main.c
+### 4.1 Khởi tạo và liên kết các dịch vụ trong app_main.c
 ```c
 #include "imu_service.h"
+#include "svc_cloud.h"
 
 void app_main(void) {
-    // Khởi tạo NVS, Bus I2C trước...
+    // 1. Khởi tạo NVS, Bus I2C, MPU6050 trước...
     
-    // Khởi tạo dịch vụ IMU với ngắt tại chân GPIO 11
-    esp_err_t err = imu_service_init(GPIO_NUM_11);
-    if (err == ESP_OK) {
-        ESP_LOGI("MAIN", "IMU Service initialized successfully!");
-    }
+    // 2. Khởi tạo dịch vụ Cloud (hàng đợi nhận batch IMU nằm trong này)
+    svc_cloud_init(CONFIG_MQTT_BROKER_URI, CONFIG_DEVICE_ID, CONFIG_MQTT_USERNAME, CONFIG_MQTT_PASSWORD);
+
+    // 3. Khởi tạo dịch vụ IMU với ngắt tại chân GPIO 11
+    imu_service_init(GPIO_NUM_11);
+
+    // 4. Đăng ký liên kết luồng dữ liệu (Callback đẩy thẳng dữ liệu vào Cloud Queue)
+    imu_service_register_batch_callback(svc_cloud_enqueue_imu_batch);
 }
 ```
 
