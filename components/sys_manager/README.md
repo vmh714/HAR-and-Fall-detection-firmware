@@ -130,3 +130,14 @@ esp_event_handler_register(NET_EVENT, NET_EVT_WIFI_CONNECTED, &network_event_han
 // Khi WiFi kết nối thành công trong svc_network
 esp_event_post(NET_EVENT, NET_EVT_WIFI_CONNECTED, NULL, 0, portMAX_DELAY);
 ```
+
+## Enum & Sự Kiện Mở Rộng (Phase 4)
+Đã bổ sung cơ sở sự kiện `AI_EVENT`:
+```c
+ESP_EVENT_DECLARE_BASE(AI_EVENT);
+
+typedef enum {
+    AI_EVT_FALL_DETECTED
+} ai_event_id_t;
+```
+Sự kiện này được phát đi từ `svc_ai` và được `svc_cloud` lắng nghe để chớp nhoáng gửi bản tin MQTT cứu hộ.

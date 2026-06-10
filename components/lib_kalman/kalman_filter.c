@@ -78,3 +78,26 @@ float kalman_get_angle(kalman_t *kalman, float new_angle, float new_rate, float 
 
     return kalman->angle;
 }
+
+// ===== Bộ lọc Kalman 1D (Scalar) =====
+
+void kalman_1d_init(kalman_1d_t *kf, float Q, float R, float initial_value)
+{
+    kf->Q = Q;
+    kf->R = R;
+    kf->x = initial_value;
+    kf->P = 1.0f; // Bắt đầu với uncertainty cao để hội tụ nhanh
+}
+
+float kalman_1d_update(kalman_1d_t *kf, float measurement)
+{
+    // Predict (constant model: x_pred = x, P_pred = P + Q)
+    kf->P += kf->Q;
+
+    // Update
+    float K = kf->P / (kf->P + kf->R);  // Kalman Gain
+    kf->x += K * (measurement - kf->x);  // State update
+    kf->P *= (1.0f - K);                 // Covariance update
+
+    return kf->x;
+}

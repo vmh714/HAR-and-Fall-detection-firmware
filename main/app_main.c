@@ -11,29 +11,12 @@
 #include "sys_manager.h"
 #include "svc_network.h"
 #include "svc_cloud.h"
+#include "svc_ai.h"
 #include "driver/i2c_master.h"
 #include "mpu6050.h"
 #include "imu_service.h"
 
 static const char *TAG = "MAIN_APP";
-
-// ======================== PHASE 2 TEST CODE ========================
-// Task giả lập các lệnh điều khiển từ xa sau khi đã kết nối
-// static void test_fsm_task(void *pvParameters) {
-//     ESP_LOGW("TEST_FSM", "Waiting 20 seconds before simulating START STREAM command...");
-//     vTaskDelay(pdMS_TO_TICKS(20000));
-    
-//     ESP_LOGW("TEST_FSM", "Simulating Cloud Start Stream Command...");
-//     esp_event_post(CLOUD_EVENT, CLOUD_CMD_START_STREAM, NULL, 0, portMAX_DELAY);
-    
-//     vTaskDelay(pdMS_TO_TICKS(10000));
-    
-//     ESP_LOGW("TEST_FSM", "Simulating Cloud Stop Stream Command...");
-//     esp_event_post(CLOUD_EVENT, CLOUD_CMD_STOP_STREAM, NULL, 0, portMAX_DELAY);
-
-//     vTaskDelete(NULL);
-// }
-// ====================================================================
 
 // ======================== APP MAIN ========================
 void app_main(void)
@@ -73,33 +56,15 @@ void app_main(void)
     ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus_handle));
     mpu6050_init(bus_handle);
 
-    mpu6050_config_t my_cfg = {
-        .accel_fs = ACCEL_FS_8G,
-        .gyro_fs = GYRO_FS_500DPS,
-        .dlpf_cfg = DLPF_CFG_21HZ,
-        .sample_rate_hz = 100, // 100Hz
-        .pwr_cfg = { .temp_disable = true },
-        .int_cfg = {
-            .data_ready_en = true,
-            .active_low = true,
-            .latch_en = false,
-        },
-        .fifo_cfg = {
-            .fifo_enable = true,
-            .accel_fifo_en = true,
-            .gyro_fifo_en = true,
-            .temp_fifo_en = false,
-        }
-    };
-    mpu6050_config(&my_cfg);
-    mpu6050_calibrate_gyro();
-
+    // IMU Service: config + calibrate + PCNT + processing task (tất cả bên trong)
     ESP_LOGI(TAG, "Initializing IMU Service...");
     imu_service_init(MPU6050_INT_PIN);
     imu_service_register_batch_callback(svc_cloud_enqueue_imu_batch);
 
-    ESP_LOGI(TAG, "System Skeleton Initialized. Main thread yields.");
+    // 4. Khởi tạo AI Service
+    ESP_LOGI(TAG, "Initializing AI Service...");
+    svc_ai_init();
 
-    // Chạy Task test giả lập lệnh điều khiển FSM
-    //xTaskCreate(test_fsm_task, "test_fsm_task", 2048, NULL, 5, NULL);
+    ESP_LOGI(TAG, "System Skeleton Initialized. Main thread yields.");
 }
+

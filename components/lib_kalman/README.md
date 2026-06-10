@@ -86,4 +86,17 @@ float gyro_roll_rate = gyro_x;                            // Vận tốc góc ro
 // Lọc Kalman
 float smooth_roll = kalman_get_angle(&filter_roll, accel_roll, gyro_roll_rate, 0.01f);
 ```
----
+### 3.3 Lọc Kalman 1D (Mới thêm Phase 4)
+Để tiền xử lý dữ liệu đầu vào cho mảng TinyML, hệ thống cần làm phẳng tín hiệu của từng trục gia tốc và con quay hồi chuyển độc lập (tổng cộng 6 trục).
+```c
+typedef struct {
+    float x;  // Giá trị ước lượng hiện tại
+    float P;  // Hiệp phương sai sai số
+    float Q;  // Nhiễu quá trình (càng lớn càng bám sát dữ liệu thực)
+    float R;  // Nhiễu đo lường (càng lớn càng mượt nhưng bị trễ)
+} kalman_1d_t;
+
+void kalman_1d_init(kalman_1d_t *kf, float Q, float R, float initial_value);
+float kalman_1d_update(kalman_1d_t *kf, float measurement);
+```
+Mỗi trục của IMU (ax, ay, az, gx, gy, gz) sẽ có một instance `kalman_1d_t` riêng để chuẩn hóa đầu vào model.

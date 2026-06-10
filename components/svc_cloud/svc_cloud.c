@@ -43,7 +43,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         
         // Subscribe to cmd topic
         char cmd_topic[128];
-        snprintf(cmd_topic, sizeof(cmd_topic), "v1/devices/%s/cmd", s_device_id);
+        snprintf(cmd_topic, sizeof(cmd_topic), "eldercare/%s/command", s_device_id);
         esp_mqtt_client_subscribe(s_mqtt_client, cmd_topic, 1);
         ESP_LOGI(TAG, "Subscribed to topic: %s", cmd_topic);
         
@@ -60,7 +60,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         ESP_LOGI(TAG, "MQTT Data received on topic: %.*s", event->topic_len, event->topic);
         
         char cmd_topic_check[128];
-        snprintf(cmd_topic_check, sizeof(cmd_topic_check), "v1/devices/%s/cmd", s_device_id);
+        snprintf(cmd_topic_check, sizeof(cmd_topic_check), "eldercare/%s/command", s_device_id);
         
         if (strncmp(event->topic, cmd_topic_check, event->topic_len) == 0) {
             char *json_str = malloc(event->data_len + 1);
@@ -106,6 +106,7 @@ static void svc_cloud_task(void *pvParameters) {
     while (1) {
         if (xQueueReceive(s_imu_queue, &batch, portMAX_DELAY) == pdTRUE) {
             if (!s_mqtt_connected || s_mqtt_client == NULL) {
+                ESP_LOGW(TAG, "MQTT disconnected. Dropping IMU batch (count: %d)", batch.count);
                 continue;
             }
             
@@ -132,7 +133,7 @@ static void svc_cloud_task(void *pvParameters) {
                     char *json_str = cJSON_PrintUnformatted(root);
                     if (json_str) {
                         char topic[128];
-                        snprintf(topic, sizeof(topic), "v1/devices/%s/imu_stream", s_device_id);
+                        snprintf(topic, sizeof(topic), "eldercare/%s/imu_stream", s_device_id);
                         int msg_id = esp_mqtt_client_publish(s_mqtt_client, topic, json_str, 0, 0, 0);
                         ESP_LOGI(TAG, "Published IMU batch (len: %zu) to %s, msg_id=%d", strlen(json_str), topic, msg_id);
                         free(json_str);
@@ -153,6 +154,8 @@ static void net_event_handler(void* arg, esp_event_base_t event_base, int32_t ev
             .credentials.username = s_mqtt_cfg_data.username,
             .credentials.authentication.password = s_mqtt_cfg_data.password,
             .credentials.client_id = s_mqtt_cfg_data.client_id,
+            .buffer.size = 2048,
+            .buffer.out_size = 2048,
         };
         
         if (s_mqtt_client == NULL) {

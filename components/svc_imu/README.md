@@ -49,9 +49,13 @@ Trong thực tế, khi cảm biến MPU6050 hoạt động ở tần suất cao,
 
 ```c
 typedef struct {
-    float roll[IMU_WINDOW_SIZE];   // Mảng lưu góc roll lọc qua Kalman
-    float pitch[IMU_WINDOW_SIZE];  // Mảng lưu góc pitch lọc qua Kalman
-    uint16_t head;                 // Con trỏ đầu ghi của bộ đệm vòng
+    float ax[IMU_WINDOW_SIZE];
+    float ay[IMU_WINDOW_SIZE];
+    float az[IMU_WINDOW_SIZE];
+    float gx[IMU_WINDOW_SIZE];
+    float gy[IMU_WINDOW_SIZE];
+    float gz[IMU_WINDOW_SIZE];
+    uint16_t head;
 } imu_window_t;
 ```
 
@@ -68,11 +72,11 @@ esp_err_t imu_service_init(gpio_num_t int_pin);
 *   Thiết lập hiệu chuẩn Gyro tĩnh.
 *   Tạo Task điều phối FreeRTOS `imu_task` với mức độ ưu tiên cao (`Priority 10`) để xử lý thời gian thực nhanh nhất.
 
-### 3.2 Lấy dữ liệu góc tức thời
+### 3.2 Lấy dữ liệu tư thế (Pitch) tức thời
 ```c
-void imu_service_get_latest_angles(float *roll, float *pitch);
+void imu_service_get_latest_pitch(float *pitch);
 ```
-Đọc nhanh giá trị Roll và Pitch sau khi lọc Kalman tại thời điểm hiện tại. An toàn khi gọi từ các task khác nhờ cơ chế bảo vệ mutex/volatile nội bộ.
+Đọc nhanh giá trị Pitch sau khi được dung hợp bởi thuật toán Kalman Fusion (2 trạng thái) tại thời điểm hiện tại. Góc này dùng độc lập để xác định tư thế người (đứng/nằm/ngồi). An toàn khi gọi từ task khác nhờ cơ chế bảo vệ nội bộ.
 
 ### 3.3 Đăng ký Callback xử lý Batch (Tránh Circular Dependency)
 ```c

@@ -4,8 +4,8 @@
 #include "driver/gpio.h"
 #include "mpu6050.h"
 
-// Kích thước của Sliding Window (100 mẫu = 1 giây ở 100Hz)
-#define IMU_WINDOW_SIZE 100
+// Kích thước của Sliding Window (200 mẫu = 2 giây ở 100Hz)
+#define IMU_WINDOW_SIZE 200
 #define IMU_BATCH_SIZE 50
 
 typedef struct __attribute__((packed)) {
@@ -18,10 +18,15 @@ typedef struct {
     uint16_t count;
 } imu_batch_data_t;
 
+// Sliding window chứa 6 trục IMU đã chuẩn hóa về (-1, 1) cho TinyML INT8
 typedef struct {
-    float roll[IMU_WINDOW_SIZE];
-    float pitch[IMU_WINDOW_SIZE];
-    uint16_t head; // Chỉ số hiện tại của bộ đệm vòng
+    float ax[IMU_WINDOW_SIZE];
+    float ay[IMU_WINDOW_SIZE];
+    float az[IMU_WINDOW_SIZE];
+    float gx[IMU_WINDOW_SIZE];
+    float gy[IMU_WINDOW_SIZE];
+    float gz[IMU_WINDOW_SIZE];
+    uint16_t head;
 } imu_window_t;
 
 /**
@@ -31,7 +36,7 @@ typedef struct {
  * @return esp_err_t 
  */
 esp_err_t imu_service_init(gpio_num_t int_pin);
-void imu_service_get_latest_angles(float *roll, float *pitch);
+void imu_service_get_latest_pitch(float *pitch);
 
 typedef esp_err_t (*imu_batch_callback_t)(const void *batch_data);
 void imu_service_register_batch_callback(imu_batch_callback_t cb);
