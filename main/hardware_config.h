@@ -2,8 +2,8 @@
 #define HARDWARE_CONFIG_H
 
 // ======================== WIFI CONFIGURATION ========================
-#define CONFIG_WIFI_SSID "IT Hoc Bach Khoa"
-#define CONFIG_WIFI_PASSWORD "chungtalamotgiadinh"
+#define CONFIG_WIFI_SSID "HEHE"
+#define CONFIG_WIFI_PASSWORD "11111111"
 
 // ======================== MQTT CONFIGURATION ========================
 #define CONFIG_MQTT_BROKER_URI "mqtt://mqtt.toolhub.app"
