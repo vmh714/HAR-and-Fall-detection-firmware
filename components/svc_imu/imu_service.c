@@ -68,12 +68,12 @@ static void imu_processing_task(void *pvParameters)
                 mpu6050_raw_to_float(&raw_data[i], &processed_data);
 
                 // Chuyển đổi trục: Sensor frame → Body frame (Forward-Left-Up)
-                float ax_body = processed_data.az;
-                float ay_body = processed_data.ax;
-                float az_body = processed_data.ay;
-                float gx_body = processed_data.gz;
-                float gy_body = processed_data.gx;
-                float gz_body = processed_data.gy;
+                float ax_body = -processed_data.ax;
+                float ay_body = -processed_data.ay;
+                float az_body = processed_data.az;
+                float gx_body = -processed_data.gx;
+                float gy_body = -processed_data.gy;
+                float gz_body = processed_data.gz;
 
                 // Pitch chỉ dùng để xác định tư thế (nằm/đứng/ngồi)
                 float accel_pitch = atan2(-ax_body, sqrt(ay_body * ay_body + az_body * az_body)) * RAD_TO_DEG;
@@ -185,9 +185,9 @@ esp_err_t imu_service_init(gpio_num_t int_pin)
 
     // --- HOT START: Seed với giá trị thực để tránh ramp-up từ 0 ---
     mpu6050_data_t init_data = mpu6050_read();
-    float ax_body = init_data.az;
-    float ay_body = init_data.ax;
-    float az_body = init_data.ay;
+    float ax_body = -init_data.ax;
+    float ay_body = -init_data.ay;
+    float az_body = init_data.az;
 
     float init_pitch = atan2(-ax_body, sqrt(ay_body * ay_body + az_body * az_body)) * RAD_TO_DEG;
     kal_pitch.angle = init_pitch;
@@ -195,7 +195,7 @@ esp_err_t imu_service_init(gpio_num_t int_pin)
 
     // Seed 6-axis Kalman 1D với giá trị đọc ban đầu
     kf_ax.x = ax_body;  kf_ay.x = ay_body;  kf_az.x = az_body;
-    kf_gx.x = init_data.gz;  kf_gy.x = init_data.gx;  kf_gz.x = init_data.gy;
+    kf_gx.x = -init_data.gx;  kf_gy.x = -init_data.gy;  kf_gz.x = init_data.gz;
 
     ESP_LOGI(TAG, "Hot start completed. Initial Pitch: %.2f", init_pitch);
 

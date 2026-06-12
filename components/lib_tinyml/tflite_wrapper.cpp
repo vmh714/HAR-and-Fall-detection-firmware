@@ -1,49 +1,51 @@
 #include "tflite_wrapper.h"
-
 #include <stdio.h>
+#include "esp_heap_caps.h"  // Thêm thư viện để cấp phát PSRAM
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "esp_heap_caps.h" // Thêm thư viện để cấp phát PSRAM
-//#include <math.h>
-
-#include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
+// #include <math.h>
+#include "model_data.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
+#include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/micro/system_setup.h"
 #include "tensorflow/lite/schema/schema_generated.h"
-
-#include "model_data.h"
 
 static const char* TAG = "TFLiteWrapper";
 
 namespace {
-    const tflite::Model* model = nullptr;
-    tflite::MicroInterpreter* interpreter = nullptr;
-    TfLiteTensor* input = nullptr;
-    TfLiteTensor* output = nullptr;
+const tflite::Model* model = nullptr;
+tflite::MicroInterpreter* interpreter = nullptr;
+TfLiteTensor* input = nullptr;
+TfLiteTensor* output = nullptr;
 
-    // Tăng kích thước lên 1MB
-    constexpr int kTensorArenaSize = 100 * 1024;
-    
-    //uint8_t tensor_arena[kTensorArenaSize];
-    //Đổi từ mảng tĩnh sang con trỏ để cấp phát động
-    uint8_t* tensor_arena = nullptr;
+// Tăng kích thước lên 1MB
+constexpr int kTensorArenaSize = 100 * 1024;
+
+// uint8_t tensor_arena[kTensorArenaSize];
+// Đổi từ mảng tĩnh sang con trỏ để cấp phát động
+uint8_t* tensor_arena = nullptr;
 }  // namespace
 
 int tflite_init(void) {
     tflite::InitializeTarget();
 
-    //1. Cấp phát Tensor Arena vào PSRAM
-    tensor_arena = (uint8_t*)heap_caps_malloc(kTensorArenaSize, MALLOC_CAP_SPIRAM);
+    // 1. Cấp phát Tensor Arena vào PSRAM
+    tensor_arena =
+        (uint8_t*)heap_caps_malloc(kTensorArenaSize, MALLOC_CAP_SPIRAM);
     if (tensor_arena == nullptr) {
-        ESP_LOGE(TAG, "Lỗi: Không thể cấp phát %d bytes trên PSRAM!", kTensorArenaSize);
+        ESP_LOGE(TAG, "Lỗi: Không thể cấp phát %d bytes trên PSRAM!",
+                 kTensorArenaSize);
         return -1;
     }
-    ESP_LOGI(TAG, "Đã cấp phát thành công %d bytes trên PSRAM.", kTensorArenaSize);
+    ESP_LOGI(TAG, "Đã cấp phát thành công %d bytes trên PSRAM.",
+             kTensorArenaSize);
 
     // 2. Load mô hình
     model = tflite::GetModel(g_model_data);
     if (model->version() != TFLITE_SCHEMA_VERSION) {
-        ESP_LOGE(TAG, "Model provided is schema version %d not equal to supported version %d.",
+        ESP_LOGE(TAG,
+                 "Model provided is schema version %d not equal to supported "
+                 "version %d.",
                  (int)model->version(), (int)TFLITE_SCHEMA_VERSION);
         return -1;
     }
@@ -53,7 +55,7 @@ int tflite_init(void) {
     resolver.AddAdd();
     resolver.AddConcatenation();
     resolver.AddConv2D();
-    resolver.AddDepthwiseConv2D(); // Thêm op này để sửa lỗi DEPTHWISE_CONV_2D
+    resolver.AddDepthwiseConv2D();
     resolver.AddExpandDims();
     resolver.AddFullyConnected();
     resolver.AddLogistic();
@@ -81,15 +83,18 @@ int tflite_init(void) {
     // In ra lượng RAM thực tế yêu cầu
     ESP_LOGI(TAG, "================================================");
     ESP_LOGI(TAG, "TFLITE ARENA CALCULATION RESULTS:");
-    ESP_LOGI(TAG, "Total Arena Size Configured: %d bytes (PSRAM)", kTensorArenaSize);
-    ESP_LOGI(TAG, "Actual Arena Used: %d bytes", (int)interpreter->arena_used_bytes());
+    ESP_LOGI(TAG, "Total Arena Size Configured: %d bytes (PSRAM)",
+             kTensorArenaSize);
+    ESP_LOGI(TAG, "Actual Arena Used: %d bytes",
+             (int)interpreter->arena_used_bytes());
     ESP_LOGI(TAG, "================================================");
 
     input = interpreter->input(0);
     output = interpreter->output(0);
-    
+
     ESP_LOGI(TAG, "Model initialized successfully!");
-    ESP_LOGI(TAG, "Input shape: [%d, %d, %d]", input->dims->data[0], input->dims->data[1], input->dims->data[2]);
+    ESP_LOGI(TAG, "Input shape: [%d, %d, %d]", input->dims->data[0],
+             input->dims->data[1], input->dims->data[2]);
     return 0;
 }
 
@@ -105,7 +110,7 @@ void tflite_run_inference(void) {
         }
     } else if (input->type == kTfLiteInt8) {
         for (int i = 0; i < input->bytes; ++i) {
-            input->data.int8[i] = 0; 
+            input->data.int8[i] = 0;
         }
     }
 
@@ -121,13 +126,15 @@ void tflite_run_inference(void) {
 
     ESP_LOGI(TAG, "================================================");
     ESP_LOGI(TAG, "INFERENCE PERFORMANCE:");
-    ESP_LOGI(TAG, "Inference Time: %lld microseconds (%.2f ms)", inference_time_us, inference_time_us / 1000.0);
+    ESP_LOGI(TAG, "Inference Time: %lld microseconds (%.2f ms)",
+             inference_time_us, inference_time_us / 1000.0);
     ESP_LOGI(TAG, "================================================");
 }
 
 int get_input_bytes(void) {
     if (input != nullptr) {
-        // Luôn trả về số byte của mảng FLOAT32 (để tương thích với data thật từ IMU/Python)
+        // Luôn trả về số byte của mảng FLOAT32 (để tương thích với data thật từ
+        // IMU/Python)
         int elements = 1;
         for (int i = 0; i < input->dims->size; ++i) {
             elements *= input->dims->data[i];
@@ -137,8 +144,9 @@ int get_input_bytes(void) {
     return 0;
 }
 
-ai_inference_result_t tflite_run_inference_with_data(float* rx_data, size_t num_bytes) {
-    ai_inference_result_t result = {0};
+ai_inference_result_t tflite_run_inference_with_data(float* rx_data,
+                                                     size_t num_bytes) {
+    ai_inference_result_t result = {AI_CLASS_UNKNOWN, 0.0f, 0.0f, 0, false};
     result.is_valid = false;
 
     if (interpreter == nullptr || input == nullptr || output == nullptr) {
@@ -153,22 +161,25 @@ ai_inference_result_t tflite_run_inference_with_data(float* rx_data, size_t num_
     }
 
     if (elements != expected_elements) {
-        ESP_LOGE(TAG, "Size mismatch: Expected %d elements, got %d elements", expected_elements, elements);
+        ESP_LOGE(TAG, "Size mismatch: Expected %d elements, got %d elements",
+                 expected_elements, elements);
         return result;
     }
 
     // Ép kiểu (Quantize) từ dữ liệu Float sang INT8
     if (input->type == kTfLiteInt8) {
         for (int i = 0; i < elements; i++) {
-            // LƯU Ý: Dữ liệu từ imu_service đã được chuẩn hóa về khoảng [-1.0, 1.0]
-            // Nên chúng ta KHÔNG cần kẹp và chia 8.0g hoặc 2000.0dps ở đây nữa.
+            // LƯU Ý: Dữ liệu từ imu_service đã được chuẩn hóa về khoảng
+            // [-1.0, 1.0] Nên chúng ta KHÔNG cần kẹp và chia 8.0g hoặc
+            // 2000.0dps ở đây nữa.
             float val = rx_data[i];
-            
+
             // Kẹp cứng vào giới hạn an toàn đề phòng ngoại lệ
             if (val > 1.0f) val = 1.0f;
             if (val < -1.0f) val = -1.0f;
 
-            int32_t quantized_val = round(val / input->params.scale) + input->params.zero_point;
+            int32_t quantized_val =
+                round(val / input->params.scale) + input->params.zero_point;
             // Kẹp (Clamp) giá trị vào giới hạn int8_t
             if (quantized_val > 127) quantized_val = 127;
             if (quantized_val < -128) quantized_val = -128;
@@ -184,7 +195,7 @@ ai_inference_result_t tflite_run_inference_with_data(float* rx_data, size_t num_
     int64_t start_time = esp_timer_get_time();
     TfLiteStatus invoke_status = interpreter->Invoke();
     int64_t end_time = esp_timer_get_time();
-    
+
     if (invoke_status != kTfLiteOk) {
         ESP_LOGE(TAG, "Invoke failed!");
         return result;
@@ -199,36 +210,36 @@ ai_inference_result_t tflite_run_inference_with_data(float* rx_data, size_t num_
     }
 
     // --- Giải Lượng tử hóa (Dequantize) Đầu Ra ---
-    float probs[10]; // Giả sử model có tối đa 10 class
+    float probs[10];  // Giả sử model có tối đa 10 class
     if (num_classes > 10) num_classes = 10;
-    
+
     for (int i = 0; i < num_classes; i++) {
         if (output->type == kTfLiteInt8) {
-            probs[i] = (output->data.int8[i] - output->params.zero_point) * output->params.scale;
+            probs[i] = (output->data.int8[i] - output->params.zero_point) *
+                       output->params.scale;
         } else {
             probs[i] = output->data.f[i];
         }
     }
 
-    int predicted_class = 0;
+    int predicted_class_idx = 0;
     float max_prob = probs[0];
     for (int i = 1; i < num_classes; i++) {
         if (probs[i] > max_prob) {
             max_prob = probs[i];
-            predicted_class = i;
+            predicted_class_idx = i;
         }
     }
 
     // --- Cập nhật: Logic 25% Threshold cho Fall ---
-    const int FALL_CLASS_INDEX = 4; // 'Fall' là class thứ 5 theo CLASS_NAMES
-    if (num_classes > FALL_CLASS_INDEX && probs[FALL_CLASS_INDEX] >= 0.25f) {
-        predicted_class = FALL_CLASS_INDEX;
+    if (num_classes > AI_CLASS_FALL && probs[AI_CLASS_FALL] >= 0.6f) {
+        predicted_class_idx = AI_CLASS_FALL;
     }
 
-    result.predicted_class = predicted_class;
+    result.predicted_class = (ai_posture_class_t)predicted_class_idx;
     result.max_prob = max_prob;
-    if (num_classes > FALL_CLASS_INDEX) {
-        result.fall_prob = probs[FALL_CLASS_INDEX];
+    if (num_classes > AI_CLASS_FALL) {
+        result.fall_prob = probs[AI_CLASS_FALL];
     }
     result.is_valid = true;
 

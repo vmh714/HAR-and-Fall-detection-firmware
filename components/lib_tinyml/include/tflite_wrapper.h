@@ -17,9 +17,19 @@ void tflite_run_inference(void);
 #include <stdbool.h>
 #include <stdint.h>
 
+// Các nhãn phân loại từ mô hình AI (phải khớp với class list khi train)
+typedef enum {
+    AI_CLASS_WALK = 0,
+    AI_CLASS_RUN = 1,
+    AI_CLASS_IDLE = 2,
+    AI_CLASS_TRANSITION = 3,
+    AI_CLASS_FALL = 4,
+    AI_CLASS_UNKNOWN = 5
+} ai_posture_class_t;
+
 // Struct chứa kết quả trả về từ mô hình AI
 typedef struct {
-  int predicted_class;       // 0: Walk, 1: Run, 2: Idle, 3: Stairs, 4: Fall
+  ai_posture_class_t predicted_class;
   float max_prob;            // Xác suất của predicted_class (0.0 - 1.0)
   float fall_prob;           // Xác suất của class Fall
   int64_t inference_time_us; // Thời gian thực thi (microseconds)

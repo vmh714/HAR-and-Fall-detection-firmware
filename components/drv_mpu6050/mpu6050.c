@@ -438,6 +438,23 @@ esp_err_t mpu6050_read_fifo(mpu6050_data_raw_t *data_array, uint16_t *count)
     ESP_ERROR_CHECK(i2c_master_transmit_receive(mpu6050_dev.i2c_dev, &count_reg, 1, count_data, 2, 100));
     uint16_t bytes_in_fifo = (count_data[0] << 8) | count_data[1];
 
+    // Phát hiện FIFO Tràn (Overflow) gây lệch byte (out-of-sync)
+    if (bytes_in_fifo == 1024)
+    {
+        ESP_LOGW("MPU6050", "FIFO Overflow detected! Resetting FIFO to prevent byte misalignment.");
+        mpu6050_reset_fifo();
+        *count = 0;
+        return ESP_OK;
+    }
+    // Phát hiện FIFO bị lệch byte (không chia hết cho packet_size) do đọc sót
+    else if (bytes_in_fifo % packet_size != 0)
+    {
+        ESP_LOGW("MPU6050", "FIFO Misaligned (bytes: %d, packet: %d). Resetting...", bytes_in_fifo, packet_size);
+        mpu6050_reset_fifo();
+        *count = 0;
+        return ESP_OK;
+    }
+
     // 3. Tính số gói tin thực tế có thể đọc
     uint16_t pkgs_available = bytes_in_fifo / packet_size;
     if (pkgs_available == 0)
