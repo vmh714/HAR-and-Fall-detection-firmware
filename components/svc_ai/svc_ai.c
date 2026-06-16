@@ -18,10 +18,16 @@ typedef struct
 
 static QueueHandle_t s_ai_queue = NULL;
 static char s_latest_pred_str[16] = "Unknown";
+static float s_latest_pred_conf = 0.0f;
 
 const char* svc_ai_get_latest_prediction(void)
 {
     return s_latest_pred_str;
+}
+
+float svc_ai_get_latest_confidence(void)
+{
+    return s_latest_pred_conf;
 }
 
 // Buffer phẳng hóa để chứa data interleaved truyền vào model TFLite.
@@ -93,6 +99,7 @@ static void svc_ai_task(void* pvParameters)
                 strncpy(s_latest_pred_str, pred_name,
                         sizeof(s_latest_pred_str) - 1);
                 s_latest_pred_str[sizeof(s_latest_pred_str) - 1] = '\0';
+                s_latest_pred_conf = result.max_prob;
 
                 ESP_LOGI(TAG, "--- AI INFERENCE RESULT ---");
                 ESP_LOGI(

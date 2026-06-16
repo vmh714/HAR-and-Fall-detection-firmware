@@ -38,6 +38,12 @@ extern "C"
      */
     const char* svc_ai_get_latest_prediction(void);
 
+    /**
+     * @brief Lấy độ tự tin (confidence) của kết quả dự đoán gần nhất
+     * @return float (từ 0.0 đến 1.0)
+     */
+    float svc_ai_get_latest_confidence(void);
+
 #ifdef __cplusplus
 }
 #endif

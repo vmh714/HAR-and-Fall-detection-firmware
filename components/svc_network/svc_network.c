@@ -23,17 +23,10 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     {
         s_connected = false;
         esp_event_post(NET_EVENT, NET_EVT_DISCONNECTED, NULL, 0, portMAX_DELAY);
-        
-        if (s_retry_num < MAXIMUM_RETRY)
-        {
-            esp_wifi_connect();
-            s_retry_num++;
-            ESP_LOGI(TAG, "Retrying Wi-Fi connection... (%d/%d)", s_retry_num, MAXIMUM_RETRY);
-        }
-        else
-        {
-            ESP_LOGW(TAG, "Wi-Fi connection failed after %d retries.", MAXIMUM_RETRY);
-        }
+        // Không giới hạn số lần thử kết nối để đảm bảo tính sẵn sàng
+        esp_wifi_connect();
+        s_retry_num++;
+        ESP_LOGI(TAG, "Retrying Wi-Fi connection... (attempt %d)", s_retry_num);
     }
     else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
     {
@@ -60,7 +53,7 @@ esp_err_t svc_network_init(const char *ssid, const char *pass)
 
     wifi_config_t wifi_config = {
         .sta = {
-            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+            .threshold.authmode = WIFI_AUTH_WPA_WPA2_PSK,
         },
     };
     strncpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid) - 1);

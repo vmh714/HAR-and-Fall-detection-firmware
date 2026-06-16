@@ -13,6 +13,8 @@
 #include "mqtt_client.h"
 #include "sys_manager.h"
 #include "svc_ai.h"
+#include "nvs.h"
+#include "nvs_flash.h"
 
 static const char* TAG = "SVC_CLOUD";
 
@@ -21,6 +23,7 @@ static volatile bool s_mqtt_connected = false;
 static TaskHandle_t s_cloud_task_handle = NULL;
 static char s_device_id[64] = {0};
 static QueueHandle_t s_imu_queue = NULL;
+static uint32_t s_telemetry_interval_ms = 5000; // Mặc định 5s
 
 typedef struct
 {
@@ -113,6 +116,31 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base,
                                 // TODO: Thêm logic cập nhật OTA ở Phase 5.1 (vd
                                 // parse URL từ cJSON)
                             }
+                            else if (strcmp(action_item->valuestring, "set_interval") == 0)
+                            {
+                                cJSON* val_item = cJSON_GetObjectItem(root, "val");
+                                if (cJSON_IsNumber(val_item))
+                                {
+                                    uint32_t new_interval_sec = val_item->valueint;
+                                    if (new_interval_sec >= 1 && new_interval_sec <= 3600)
+                                    {
+                                        s_telemetry_interval_ms = new_interval_sec * 1000;
+                                        ESP_LOGI(TAG, "Action: set_interval. New interval: %lu ms", s_telemetry_interval_ms);
+                                        
+                                        // Ghi đè vào NVS
+                                        nvs_handle_t my_handle;
+                                        esp_err_t err = nvs_open("config", NVS_READWRITE, &my_handle);
+                                        if (err == ESP_OK) {
+                                            nvs_set_u32(my_handle, "tel_int", s_telemetry_interval_ms);
+                                            nvs_commit(my_handle);
+                                            nvs_close(my_handle);
+                                            ESP_LOGI(TAG, "Saved new telemetry interval to NVS");
+                                        } else {
+                                            ESP_LOGE(TAG, "Error (%s) opening NVS handle!", esp_err_to_name(err));
+                                        }
+                                    }
+                                }
+                            }
                             else
                             {
                                 ESP_LOGW(TAG, "Unknown action: %s",
@@ -144,7 +172,6 @@ static void svc_cloud_task(void* pvParameters)
     ESP_LOGI(TAG, "Cloud Task started. Waiting for IMU batches...");
 
     TickType_t last_telemetry_time = xTaskGetTickCount();
-    const TickType_t telemetry_interval = pdMS_TO_TICKS(1000);
 
     while (1)
     {
@@ -206,9 +233,9 @@ static void svc_cloud_task(void* pvParameters)
         }
 
         // --- Task 4.4: Telemetry (Pedometer & Battery) ---
-        // Gửi status mỗi 60 giây khi đang ở STATE_NORMAL
+        // Gửi status theo chu kỳ s_telemetry_interval_ms khi đang ở STATE_NORMAL
         if (s_mqtt_connected &&
-            (xTaskGetTickCount() - last_telemetry_time >= telemetry_interval))
+            (xTaskGetTickCount() - last_telemetry_time >= pdMS_TO_TICKS(s_telemetry_interval_ms)))
         {
             if (sys_manager_get_state() == STATE_NORMAL)
             {
@@ -220,6 +247,8 @@ static void svc_cloud_task(void* pvParameters)
                     cJSON_AddNumberToObject(root, "steps", 0);  // Placeholder
                     cJSON_AddStringToObject(root, "state", "NORMAL");
                     cJSON_AddStringToObject(root, "ai_pred", svc_ai_get_latest_prediction());
+                    cJSON_AddNumberToObject(root, "ai_conf", svc_ai_get_latest_confidence());
+                    cJSON_AddNumberToObject(root, "interval", s_telemetry_interval_ms / 1000);
                     char* json_str = cJSON_PrintUnformatted(root);
                     if (json_str)
                     {
@@ -350,6 +379,17 @@ esp_err_t svc_cloud_init(const char* broker_uri, const char* client_id,
     strncpy(s_mqtt_cfg_data.password, password,
             sizeof(s_mqtt_cfg_data.password) - 1);
     strncpy(s_device_id, client_id, sizeof(s_device_id) - 1);
+
+    // Read saved interval from NVS
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open("config", NVS_READONLY, &my_handle);
+    if (err == ESP_OK) {
+        nvs_get_u32(my_handle, "tel_int", &s_telemetry_interval_ms);
+        nvs_close(my_handle);
+        ESP_LOGI(TAG, "Loaded telemetry interval from NVS: %lu ms", s_telemetry_interval_ms);
+    } else {
+        ESP_LOGI(TAG, "No saved telemetry interval, using default: %lu ms", s_telemetry_interval_ms);
+    }
 
     s_imu_queue = xQueueCreate(5, sizeof(imu_batch_data_t));
     if (s_imu_queue == NULL)

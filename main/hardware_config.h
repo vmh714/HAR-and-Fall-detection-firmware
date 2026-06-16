@@ -2,8 +2,8 @@
 #define HARDWARE_CONFIG_H
 
 // ======================== WIFI CONFIGURATION ========================
-#define CONFIG_WIFI_SSID "IT Hoc Bach Khoa"
-#define CONFIG_WIFI_PASSWORD "chungtalamotgiadinh"
+#define CONFIG_WIFI_SSID "MD_LAPTOP"
+#define CONFIG_WIFI_PASSWORD "11111111"
 
 // ======================== MQTT CONFIGURATION ========================
 #define CONFIG_MQTT_BROKER_URI "mqtt://mqtt.toolhub.app"
@@ -14,9 +14,9 @@
 // ======================== GPIO ROUTING ========================
 
 // MPU6050 (I2C & Interrupt)
-#define I2C_MASTER_SCL_IO GPIO_NUM_9   // Physical pin D10
-#define I2C_MASTER_SDA_IO GPIO_NUM_8   // Physical pin D9
-#define MPU6050_INT_PIN GPIO_NUM_7     // Physical pin D8
+#define I2C_MASTER_SCL_IO GPIO_NUM_9  // Physical pin D10
+#define I2C_MASTER_SDA_IO GPIO_NUM_8  // Physical pin D9
+#define MPU6050_INT_PIN GPIO_NUM_7    // Physical pin D8
 #define I2C_PORT I2C_NUM_0
 
 // A7680C (4G LTE - UART)
@@ -24,4 +24,4 @@
 #define A7680C_RX_PIN GPIO_NUM_44
 #define A7680C_PWRKEY_PIN GPIO_NUM_38
 #define UART_PORT UART_NUM_2
-#endif // HARDWARE_CONFIG_H
+#endif  // HARDWARE_CONFIG_H
