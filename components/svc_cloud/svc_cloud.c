@@ -22,6 +22,8 @@ static esp_mqtt_client_handle_t s_mqtt_client = NULL;
 static volatile bool s_mqtt_connected = false;
 static TaskHandle_t s_cloud_task_handle = NULL;
 static char s_device_id[64] = {0};
+/// Hàng đợi IMU tách biệt: luồng IMU stream (STREAMING) đi qua queue riêng,
+/// không dùng chung với telemetry/alert để tránh chặn lẫn nhau khi tải cao.
 static QueueHandle_t s_imu_queue = NULL;
 static uint32_t s_telemetry_interval_ms = 5000; // Mặc định 5s
 
@@ -35,6 +37,14 @@ typedef struct
 
 static mqtt_config_t s_mqtt_cfg_data;
 
+/**
+ * @brief Xử lý các sự kiện từ MQTT client (kết nối, mất kết nối, nhận data, lỗi).
+ *        Khi nhận lệnh trên topic command sẽ parse JSON và phát event điều khiển tương ứng.
+ * @param handler_args Tham số người dùng truyền khi đăng ký (không dùng).
+ * @param base Event base của MQTT.
+ * @param event_id Mã sự kiện MQTT.
+ * @param event_data Con trỏ tới dữ liệu sự kiện (esp_mqtt_event_handle_t).
+ */
 static void mqtt_event_handler(void* handler_args, esp_event_base_t base,
                                int32_t event_id, void* event_data)
 {
@@ -46,7 +56,8 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base,
             ESP_LOGI(TAG, "MQTT Connected to broker!");
             s_mqtt_connected = true;
 
-            // Subscribe to cmd topic
+            /// Subscribe topic command với QoS 1 để đảm bảo nhận đủ lệnh điều khiển
+            /// từ backend (start/stop stream, set_interval, OTA).
             char cmd_topic[128];
             snprintf(cmd_topic, sizeof(cmd_topic), "eldercare/%s/command",
                      s_device_id);
@@ -67,6 +78,7 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base,
             ESP_LOGI(TAG, "MQTT Data received on topic: %.*s", event->topic_len,
                      event->topic);
 
+            // Dựng lại topic command kỳ vọng để so khớp với topic nhận được
             char cmd_topic_check[128];
             snprintf(cmd_topic_check, sizeof(cmd_topic_check),
                      "eldercare/%s/command", s_device_id);
@@ -122,12 +134,14 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base,
                                 if (cJSON_IsNumber(val_item))
                                 {
                                     uint32_t new_interval_sec = val_item->valueint;
+                                    // Chặn giá trị hợp lệ: từ 1s đến 3600s (1 giờ)
                                     if (new_interval_sec >= 1 && new_interval_sec <= 3600)
                                     {
                                         s_telemetry_interval_ms = new_interval_sec * 1000;
                                         ESP_LOGI(TAG, "Action: set_interval. New interval: %lu ms", s_telemetry_interval_ms);
                                         
-                                        // Ghi đè vào NVS
+                                        /// Lưu interval vào NVS để giữ cấu hình qua các lần
+                                        /// khởi động lại thiết bị (đọc lại trong svc_cloud_init).
                                         nvs_handle_t my_handle;
                                         esp_err_t err = nvs_open("config", NVS_READWRITE, &my_handle);
                                         if (err == ESP_OK) {
@@ -166,6 +180,11 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base,
     }
 }
 
+/**
+ * @brief Task chính của dịch vụ Cloud: gửi IMU batch (chế độ STREAMING) và
+ *        gửi telemetry định kỳ (chế độ NORMAL) lên MQTT broker.
+ * @param pvParameters Tham số task FreeRTOS (không dùng).
+ */
 static void svc_cloud_task(void* pvParameters)
 {
     imu_batch_data_t batch;
@@ -175,8 +194,12 @@ static void svc_cloud_task(void* pvParameters)
 
     while (1)
     {
+        /// Chờ batch IMU tối đa 1s rồi mới rơi xuống nhánh telemetry; timeout này
+        /// đảm bảo telemetry vẫn được kiểm tra định kỳ ngay cả khi không có batch nào.
         if (xQueueReceive(s_imu_queue, &batch, pdMS_TO_TICKS(1000)) == pdTRUE)
         {
+            /// Mất kết nối MQTT thì bỏ luôn batch (drop) thay vì tích lũy, tránh tràn
+            /// bộ nhớ và gửi dữ liệu cũ không còn giá trị thời gian thực.
             if (!s_mqtt_connected || s_mqtt_client == NULL)
             {
                 ESP_LOGW(TAG,
@@ -191,6 +214,8 @@ static void svc_cloud_task(void* pvParameters)
             size_t raw_len = batch.count * sizeof(imu_stream_data_t);
             size_t b64_len = 0;
 
+            /// Mã hóa Base64 dữ liệu IMU nhị phân để nhúng an toàn vào JSON
+            /// (JSON không tải được byte thô). Lần gọi đầu chỉ để lấy độ dài b64_len.
             mbedtls_base64_encode(NULL, 0, &b64_len,
                                   (const unsigned char*)batch.data, raw_len);
 
@@ -218,6 +243,8 @@ static void svc_cloud_task(void* pvParameters)
                         char topic[128];
                         snprintf(topic, sizeof(topic),
                                  "eldercare/%s/imu_stream", s_device_id);
+                        /// IMU stream dùng QoS 0: dữ liệu tần suất cao, mất vài batch
+                        /// không nghiêm trọng, ưu tiên thông lượng hơn độ tin cậy.
                         int msg_id = esp_mqtt_client_publish(
                             s_mqtt_client, topic, json_str, 0, 0, 0);
                         ESP_LOGI(
@@ -242,9 +269,14 @@ static void svc_cloud_task(void* pvParameters)
                 cJSON* root = cJSON_CreateObject();
                 if (root)
                 {
-                    cJSON_AddNumberToObject(root, "battery",
-                                            100);               // Placeholder
-                    cJSON_AddNumberToObject(root, "steps", 0);  // Placeholder
+                    uint32_t walk_steps = 0, run_steps = 0;
+                    imu_service_get_steps(&walk_steps, &run_steps);
+                    cJSON_AddNumberToObject(root, "battery", 100);  // Placeholder (chờ ADC đọc pin)
+                    /// walk_steps/run_steps tách riêng để backend tính distance đúng theo loại
+                    /// (đi bộ 0.415 vs chạy 0.5 × chiều cao); "steps" = tổng để tương thích.
+                    cJSON_AddNumberToObject(root, "walk_steps", walk_steps);
+                    cJSON_AddNumberToObject(root, "run_steps", run_steps);
+                    cJSON_AddNumberToObject(root, "steps", walk_steps + run_steps);
                     cJSON_AddStringToObject(root, "state", "NORMAL");
                     cJSON_AddStringToObject(root, "ai_pred", svc_ai_get_latest_prediction());
                     cJSON_AddNumberToObject(root, "ai_conf", svc_ai_get_latest_confidence());
@@ -255,6 +287,8 @@ static void svc_cloud_task(void* pvParameters)
                         char topic[128];
                         snprintf(topic, sizeof(topic), "eldercare/%s/status",
                                  s_device_id);
+                        /// Telemetry status dùng QoS 0: gửi định kỳ liên tục, mất một
+                        /// gói sẽ được bù ở chu kỳ kế tiếp nên không cần đảm bảo gửi đến.
                         esp_mqtt_client_publish(s_mqtt_client, topic, json_str,
                                                 0, 0, 0);
                         ESP_LOGI(TAG, "Published Telemetry (Status): %s",
@@ -270,8 +304,18 @@ static void svc_cloud_task(void* pvParameters)
 }
 
 static uint64_t s_last_fall_alert_ts = 0;
+/// Cooldown 15s chống spam alert: sau mỗi lần gửi cảnh báo ngã, im lặng cố định
+/// 15 giây để một cú ngã không bị phát hiện lặp lại tạo ra hàng loạt alert trùng.
 #define FALL_COOLDOWN_US (15000000ULL)  // 15 seconds
 
+/**
+ * @brief Xử lý sự kiện phát hiện ngã từ svc_ai: publish cảnh báo SOS lên MQTT
+ *        với cơ chế cooldown chống spam.
+ * @param arg Tham số người dùng khi đăng ký (không dùng).
+ * @param event_base Event base nguồn (AI_EVENT).
+ * @param event_id Mã sự kiện (AI_EVT_FALL_DETECTED).
+ * @param event_data Dữ liệu sự kiện (không dùng).
+ */
 static void ai_event_handler(void* arg, esp_event_base_t event_base,
                              int32_t event_id, void* event_data)
 {
@@ -281,6 +325,7 @@ static void ai_event_handler(void* arg, esp_event_base_t event_base,
             return;
 
         uint64_t now = esp_timer_get_time();
+        /// Chỉ gửi nếu đã qua cooldown, hoặc đây là lần ngã đầu tiên (ts == 0).
         if (now - s_last_fall_alert_ts >= FALL_COOLDOWN_US ||
             s_last_fall_alert_ts == 0)
         {
@@ -296,6 +341,8 @@ static void ai_event_handler(void* arg, esp_event_base_t event_base,
                     char topic[128];
                     snprintf(topic, sizeof(topic), "eldercare/%s/alert",
                              s_device_id);
+                    /// Cảnh báo ngã dùng QoS 1: đây là dữ liệu sống còn, bắt buộc
+                    /// đảm bảo đến được broker ít nhất một lần (khác với telemetry QoS 0).
                     esp_mqtt_client_publish(s_mqtt_client, topic, json_str, 0,
                                             1, 0);  // QoS 1
                     free(json_str);
@@ -311,6 +358,14 @@ static void ai_event_handler(void* arg, esp_event_base_t event_base,
     }
 }
 
+/**
+ * @brief Xử lý sự kiện mạng: khởi tạo & start MQTT client khi có mạng,
+ *        dừng MQTT client khi mất mạng.
+ * @param arg Tham số người dùng khi đăng ký (không dùng).
+ * @param event_base Event base nguồn (NET_EVENT).
+ * @param event_id Mã sự kiện mạng (kết nối WiFi/Cellular hoặc mất kết nối).
+ * @param event_data Dữ liệu sự kiện (không dùng).
+ */
 static void net_event_handler(void* arg, esp_event_base_t event_base,
                               int32_t event_id, void* event_data)
 {
@@ -327,6 +382,7 @@ static void net_event_handler(void* arg, esp_event_base_t event_base,
             .buffer.out_size = 2048,
         };
 
+        // Chỉ khởi tạo client một lần; lần mất/khôi phục mạng sau chỉ start lại
         if (s_mqtt_client == NULL)
         {
             s_mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
@@ -352,12 +408,19 @@ static void net_event_handler(void* arg, esp_event_base_t event_base,
     }
 }
 
+/**
+ * @brief Đẩy một batch dữ liệu IMU vào hàng đợi để task cloud gửi đi (chế độ STREAMING).
+ * @param batch_data Con trỏ tới batch dữ liệu IMU cần gửi.
+ * @return ESP_OK nếu enqueue thành công; ESP_ERR_INVALID_STATE nếu hàng đợi chưa tạo;
+ *         ESP_ERR_NO_MEM nếu hàng đợi đầy.
+ */
 esp_err_t svc_cloud_enqueue_imu_batch(const void* batch_data)
 {
     if (s_imu_queue == NULL)
     {
         return ESP_ERR_INVALID_STATE;
     }
+    // Timeout 0: nếu queue đầy thì trả lỗi ngay, không chặn task gọi
     if (xQueueSend(s_imu_queue, batch_data, 0) != pdTRUE)
     {
         return ESP_ERR_NO_MEM;
@@ -365,6 +428,15 @@ esp_err_t svc_cloud_enqueue_imu_batch(const void* batch_data)
     return ESP_OK;
 }
 
+/**
+ * @brief Khởi tạo dịch vụ Cloud: lưu cấu hình MQTT, nạp interval telemetry từ NVS,
+ *        tạo hàng đợi IMU, đăng ký các event handler mạng/AI và tạo task xử lý.
+ * @param broker_uri URI của MQTT broker.
+ * @param client_id Định danh client MQTT, đồng thời dùng làm device_id trong topic.
+ * @param username Tên đăng nhập MQTT.
+ * @param password Mật khẩu MQTT.
+ * @return ESP_OK nếu khởi tạo thành công; ESP_ERR_NO_MEM nếu tạo hàng đợi thất bại.
+ */
 esp_err_t svc_cloud_init(const char* broker_uri, const char* client_id,
                          const char* username, const char* password)
 {
@@ -380,7 +452,8 @@ esp_err_t svc_cloud_init(const char* broker_uri, const char* client_id,
             sizeof(s_mqtt_cfg_data.password) - 1);
     strncpy(s_device_id, client_id, sizeof(s_device_id) - 1);
 
-    // Read saved interval from NVS
+    /// Nạp lại interval telemetry đã lưu trong NVS (nếu có) để giữ cấu hình người
+    /// dùng từng đặt qua lệnh set_interval; nếu chưa có thì dùng mặc định 5s.
     nvs_handle_t my_handle;
     esp_err_t err = nvs_open("config", NVS_READONLY, &my_handle);
     if (err == ESP_OK) {
@@ -391,6 +464,8 @@ esp_err_t svc_cloud_init(const char* broker_uri, const char* client_id,
         ESP_LOGI(TAG, "No saved telemetry interval, using default: %lu ms", s_telemetry_interval_ms);
     }
 
+    /// Hàng đợi IMU sâu 5 phần tử: đủ đệm vài batch khi mạng tắc nghẽn tạm thời,
+    /// vượt quá sẽ drop ở enqueue thay vì làm nghẽn task sản xuất dữ liệu.
     s_imu_queue = xQueueCreate(5, sizeof(imu_batch_data_t));
     if (s_imu_queue == NULL)
     {
@@ -409,11 +484,23 @@ esp_err_t svc_cloud_init(const char* broker_uri, const char* client_id,
     return ESP_OK;
 }
 
+/**
+ * @brief Kiểm tra trạng thái kết nối tới MQTT broker.
+ * @return true nếu đang kết nối, false nếu mất kết nối.
+ */
 bool svc_cloud_is_connected(void)
 {
     return s_mqtt_connected;
 }
 
+/**
+ * @brief Publish một message lên MQTT broker.
+ * @param topic Topic MQTT đích.
+ * @param data Nội dung payload.
+ * @param qos Mức QoS mong muốn cho topic này.
+ * @param retain Cờ retain (1 = giữ message trên broker).
+ * @return msg_id của message, hoặc -1 nếu chưa kết nối / client chưa sẵn sàng.
+ */
 int svc_cloud_publish(const char* topic, const char* data, int qos, int retain)
 {
     if (!s_mqtt_connected || s_mqtt_client == NULL)

@@ -1,9 +1,19 @@
 #ifndef HARDWARE_CONFIG_H
 #define HARDWARE_CONFIG_H
 
+// ======================== NETWORK MODE ========================
+// Bỏ comment dòng dưới để build bản PRODUCTION dùng 4G LTE (PPPoS) làm gateway.
+// Để nguyên (comment) thì dùng WiFi STA cho môi trường DEV.
+// #define NETWORK_USE_CELLULAR 1
+
 // ======================== WIFI CONFIGURATION ========================
 #define CONFIG_WIFI_SSID "MD_LAPTOP"
 #define CONFIG_WIFI_PASSWORD "11111111"
+
+// ======================== 4G LTE (A7680C) APN ========================
+#define A7680C_APN "v-internet"   // Viettel
+#define A7680C_APN_USER ""
+#define A7680C_APN_PASS ""
 
 // ======================== MQTT CONFIGURATION ========================
 #define CONFIG_MQTT_BROKER_URI "mqtt://mqtt.toolhub.app"

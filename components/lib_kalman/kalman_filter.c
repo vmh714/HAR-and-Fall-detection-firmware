@@ -1,11 +1,15 @@
 #include "kalman_filter.h"
 
+/**
+ * @brief Khởi tạo bộ lọc Kalman 2-state với thông số đã tune cho fall detection.
+ * @param kalman Con trỏ tới cấu trúc bộ lọc cần khởi tạo.
+ */
 void kalman_init(kalman_t *kalman)
 {
-    // Thông số tối ưu cho Fall Detection:
-    // - Q_angle cao hơn: bộ lọc phản ứng nhạy với thay đổi góc đột ngột
-    // - Q_bias thấp hơn: giữ bias ổn định (gyro đã calibrate tốt)
-    // - R_measure vừa phiên: tin accel lúc đứng yên, bỏ qua lúc va chạm
+    /// Thông số tối ưu cho Fall Detection:
+    /// - Q_angle cao hơn: bộ lọc phản ứng nhạy với thay đổi góc đột ngột
+    /// - Q_bias thấp hơn: giữ bias ổn định (gyro đã calibrate tốt)
+    /// - R_measure vừa phiên: tin accel lúc đứng yên, bỏ qua lúc va chạm
     kalman->Q_angle   = 0.005f;   // Tăng 5x: phản ứng nhanh hơn khi ngã
     kalman->Q_bias    = 0.001f;   // Giảm 3x: bias ấn định (calibrate rồi)
     kalman->R_measure = 0.05f;    // Tăng nhẹ: giảm tin tưởng accel khi va chạm
@@ -19,6 +23,14 @@ void kalman_init(kalman_t *kalman)
     kalman->P[1][1] = 0.0f;
 }
 
+/**
+ * @brief Cập nhật bộ lọc Kalman 2-state và trả về góc đã lọc.
+ * @param kalman Con trỏ tới cấu trúc bộ lọc.
+ * @param new_angle Góc đo từ gia tốc kế (độ).
+ * @param new_rate Vận tốc góc đo từ gyro (độ/giây).
+ * @param dt Khoảng thời gian giữa hai lần cập nhật (giây).
+ * @return Góc đã lọc, đã chuẩn hóa về [-180, 180].
+ */
 float kalman_get_angle(kalman_t *kalman, float new_angle, float new_rate, float dt)
 {
     // Bước 1: Dự đoán trạng thái (Predict)
@@ -40,14 +52,15 @@ float kalman_get_angle(kalman_t *kalman, float new_angle, float new_rate, float 
     // Bước 4: Sai số giữa đo lường và dự đoán
     float y = new_angle - kalman->angle;
 
-    // --- XỬ LÝ ANGLE WRAP-AROUND [-180, 180] ---
+    /// --- XỬ LÝ ANGLE WRAP-AROUND [-180, 180] ---
+    /// Chuẩn hóa sai số góc về [-180, 180] để tránh nhảy 360° giả khi góc đo vượt biên.
     if (y >  180.0f) y -= 360.0f;
     if (y < -180.0f) y += 360.0f;
 
-    // --- XỬ LÝ NHẢY GÓC ĐỘT NGỘT (Fall Detection Jump) ---
-    // Ngưỡng 90°: khi nguời ngã từ đứng sang nằm (Roll 90° → 0°) thì đây là jump hợp lệ cần theo.
-    // Điều chỉnh: khi jump lớn trong một bước, reset thẳng đến giá trị mới
-    // cùng với reset P matrix để Kalman hội tụ nhanh về trạng thái mới.
+    /// --- XỬ LÝ NHẢY GÓC ĐỘT NGỘT (Fall Detection Jump) ---
+    /// Ngưỡng 90°: khi nguời ngã từ đứng sang nằm (Roll 90° → 0°) thì đây là jump hợp lệ cần theo.
+    /// Điều chỉnh: khi jump lớn trong một bước, reset thẳng đến giá trị mới
+    /// cùng với reset P matrix để Kalman hội tụ nhanh về trạng thái mới.
     if (y > 90.0f || y < -90.0f) {
         kalman->angle    = new_angle;
         kalman->bias     = 0.0f;         // Reset bias: trạng thái mới, chưa biết bias
@@ -72,7 +85,8 @@ float kalman_get_angle(kalman_t *kalman, float new_angle, float new_rate, float 
     kalman->P[1][0] -= K[1] * P00_temp;
     kalman->P[1][1] -= K[1] * P01_temp;
 
-    // --- CHUẨN HÓA GÓC ĐẦU RA [-180, 180] ---
+    /// --- CHUẨN HÓA GÓC ĐẦU RA [-180, 180] ---
+    /// Giữ góc đầu ra luôn nằm trong [-180, 180] để các tầng phía sau dùng thống nhất.
     if (kalman->angle >  180.0f) kalman->angle -= 360.0f;
     if (kalman->angle < -180.0f) kalman->angle += 360.0f;
 
@@ -81,16 +95,31 @@ float kalman_get_angle(kalman_t *kalman, float new_angle, float new_rate, float 
 
 // ===== Bộ lọc Kalman 1D (Scalar) =====
 
+/**
+ * @brief Khởi tạo bộ lọc Kalman 1D (scalar).
+ * @param kf Con trỏ tới cấu trúc bộ lọc.
+ * @param Q Nhiễu quá trình.
+ * @param R Nhiễu đo lường.
+ * @param initial_value Giá trị ước lượng khởi đầu.
+ */
 void kalman_1d_init(kalman_1d_t *kf, float Q, float R, float initial_value)
 {
     kf->Q = Q;
     kf->R = R;
     kf->x = initial_value;
+    /// Bắt đầu với uncertainty (P) cao để bộ lọc bám nhanh các mẫu đầu tiên rồi mới hội tụ.
     kf->P = 1.0f; // Bắt đầu với uncertainty cao để hội tụ nhanh
 }
 
+/**
+ * @brief Cập nhật bộ lọc Kalman 1D với một giá trị đo mới.
+ * @param kf Con trỏ tới cấu trúc bộ lọc.
+ * @param measurement Giá trị đo mới.
+ * @return Giá trị ước lượng đã lọc.
+ */
 float kalman_1d_update(kalman_1d_t *kf, float measurement)
 {
+    /// Mô hình hằng: x_pred = x, P_pred = P + Q (giả định state không đổi giữa hai mẫu).
     // Predict (constant model: x_pred = x, P_pred = P + Q)
     kf->P += kf->Q;
 

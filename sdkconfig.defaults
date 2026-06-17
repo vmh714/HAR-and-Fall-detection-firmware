@@ -1,0 +1,6 @@
+# Cấu hình mặc định cho dự án — giữ qua các lần regenerate sdkconfig.
+# Bật PPP trong LwIP để A7680C hoạt động như internet gateway qua PPPoS (esp_modem).
+CONFIG_LWIP_PPP_SUPPORT=y
+CONFIG_LWIP_PPP_ENABLE_IPV6=y
+CONFIG_LWIP_PPP_PAP_SUPPORT=y
+CONFIG_LWIP_PPP_CHAP_SUPPORT=y

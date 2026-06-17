@@ -30,6 +30,8 @@ extern "C"
      *
      * @param window Con trỏ tới struct imu_window_t chứa RingBuffer dữ liệu IMU
      */
+    /// Dùng queue bất đồng bộ để tách luồng IMU khỏi inference: chỉ đẩy con trỏ
+    /// window vào queue rồi trả về ngay, không chặn task IMU trong lúc AI chạy.
     void svc_ai_process_window(const imu_window_t* window);
 
     /**

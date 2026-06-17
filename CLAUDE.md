@@ -85,16 +85,39 @@ MPU6050 (100Hz ngắt)
 
 | Topic | Hướng | Mô tả |
 |---|---|---|
-| `v1/devices/{id}/alerts` | Publish | Cảnh báo té ngã (QoS 1) |
-| `v1/devices/{id}/telemetry` | Publish | Telemetry định kỳ (pin, bước chân, ...) |
-| `v1/devices/{id}/imu_stream` | Publish | Raw IMU batch (chỉ STATE_STREAMING) |
-| `v1/devices/{id}/commands` | Subscribe | Nhận lệnh từ backend (start/stop stream, OTA) |
+| `eldercare/{id}/alert` | Publish | Cảnh báo té ngã, QoS 1 — payload `{"alert":"FALL","ts":<ms>}` |
+| `eldercare/{id}/status` | Publish | Telemetry định kỳ (pin, bước chân, state, ai_pred, ...), QoS 0 — chỉ ở STATE_NORMAL |
+| `eldercare/{id}/imu_stream` | Publish | IMU batch đã tiền xử lý (chỉ STATE_STREAMING), QoS 0 |
+| `eldercare/{id}/command` | Subscribe | Nhận lệnh từ backend (start/stop stream, set_interval, OTA), QoS 1 |
 
 ## Quy ước quan trọng
 - **Không gọi trực tiếp giữa các svc_**: mọi giao tiếp phải qua `esp_event_post()` → `sys_manager` xử lý
 - **Sliding Window**: 200 mẫu (2s ở 100Hz), trượt 50 mẫu (0.5s) — không thay đổi mà không retrain model
-- **Cooldown chống spam**: `svc_ai` im lặng 10–20 giây sau mỗi lần phát alert
+- **Cooldown chống spam**: `svc_cloud` im lặng 15 giây cố định (`FALL_COOLDOWN_US`) sau mỗi lần gửi alert; `svc_ai` không có cooldown, phát event mỗi lần phát hiện ngã
 - **`lib_model/model_data.cc`**: file này được sinh tự động từ TFLite — KHÔNG sửa tay
+
+## Quy ước comment (code style)
+
+Áp dụng cho toàn bộ code firmware (`.c` / `.h` / `.cpp`), **trừ** file legacy Phase 0 (`main/esp32s3_*.c` — không sửa). Ba loại comment, dùng đúng ký hiệu:
+
+- **Đầu hàm — BẮT BUỘC dùng block Doxygen `/** ... */`** đặt ngay trước hàm (ưu tiên hàm public trong header và hàm xử lý chính trong `.c`). Nêu ngắn gọn nhiệm vụ, kèm `@param` / `@return` khi cần:
+  ```c
+  /**
+   * @brief Khởi tạo dịch vụ IMU: cấu hình MPU6050, bộ lọc Kalman, PCNT và tạo task xử lý.
+   * @param int_pin Chân GPIO nối tới chân INT của MPU6050.
+   * @return ESP_OK nếu khởi tạo thành công.
+   */
+  esp_err_t imu_service_init(gpio_num_t int_pin);
+  ```
+- **`///` — comment nguyên lý / quyết định thiết kế quan trọng** (vì sao làm vậy, ràng buộc phần cứng, mẹo kỹ thuật cốt lõi). Là phần người đọc cần để hiểu bản chất hệ thống:
+  ```c
+  /// PCNT đếm xung INT bằng phần cứng → CPU chỉ thức dậy mỗi 50 mẫu thay vì 100 lần/giây.
+  ```
+- **`//` — comment nội bộ / debug / làm rõ một bước** (giải thích tức thời cho một dòng lệnh):
+  ```c
+  // Phòng hờ sample_rate = 0 do lỗi đọc cấu hình
+  if (sample_rate == 0) sample_rate = 100;
+  ```
 
 ## Tài liệu tham khảo chi tiết
 - Kiến trúc đầy đủ + FSM diagram + sequence diagram: `../../datn-agent-skills/project_setup/firmware_architecture_design.md`

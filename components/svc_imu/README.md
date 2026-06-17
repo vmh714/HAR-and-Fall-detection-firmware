@@ -1,7 +1,7 @@
 # 🔄 Component: svc_imu (IMU Processing Service)
 
 > **Mục đích**: Tầng dịch vụ cấp cao quản lý luồng dữ liệu IMU. Chịu trách nhiệm khởi tạo luồng ngắt FreeRTOS, đọc dữ liệu gom nhóm (FIFO Burst Read), chạy bộ lọc Kalman và duy trì cửa sổ trượt (Sliding Window).
-> **Cập nhật cuối (Timestamp)**: 2026-05-21T15:07:00+07:00
+> **Cập nhật cuối (Timestamp)**: 2026-06-17
 > **Trạng thái**: Hoạt động ổn định
 
 ---
@@ -22,9 +22,12 @@
     │
     ├─▶ Đọc cụm FIFO (Burst Read 50 mẫu) ➔ Tiết kiệm giao tiếp bus I2C
     ├─▶ Ánh xạ hệ trục tọa độ FLU (Body Frame)
-    ├─▶ Tính góc nghiêng Roll/Pitch và đẩy qua bộ lọc Kalman 1D
-    ├─▶ Cập nhật vào Bộ đệm vòng Cửa sổ trượt (Sliding Window 100 mẫu)
-    └─▶ Gọi Callback đăng ký (được nạp từ app_main.c) ➔ Gửi batch thô sang Cloud Queue
+    ├─▶ Tính góc Pitch và dung hợp bằng Kalman 2-trạng thái (kal_pitch) ➔ Xác định tư thế (nằm/đứng/ngồi)
+    ├─▶ Lọc Kalman 1D cho CẢ 6 TRỤC (kf_ax..kf_gz) ➔ Khử nhiễu gia tốc kế / con quay
+    ├─▶ Chuẩn hóa 6 trục về thang [-1, 1] theo full-scale range ➔ Làm input cho TinyML INT8
+    ├─▶ Cập nhật vào Bộ đệm vòng Cửa sổ trượt (Sliding Window 200 mẫu)
+    ├─▶ Mỗi lô 50 mẫu gọi svc_ai_process_window(&imu_win) ➔ Đẩy window sang svc_ai inference (STATE_NORMAL / STATE_STREAMING)
+    └─▶ (Chỉ STATE_STREAMING) Gọi Callback đăng ký ➔ Gửi batch (đã đổi trục + lọc Kalman + scale int16) sang Cloud Queue
 ```
 
 ### 1.1 Tối ưu hóa năng lượng với PCNT (Hardware Offloading)
@@ -44,10 +47,11 @@ Trong thực tế, khi cảm biến MPU6050 hoạt động ở tần suất cao,
 ---
 
 ## 2. KIẾN TRÚC CỬA SỔ TRƯỢT (SLIDING WINDOW) & BATCHING
-*   **Cửa sổ trượt (Sliding Window)**: Có kích thước cố định `IMU_WINDOW_SIZE = 100` mẫu (tương đương 1 giây dữ liệu lịch sử chuyển động ở tần số 100Hz). Cửa sổ này liên tục cập nhật mẫu mới nhất và đẩy mẫu cũ nhất ra ngoài qua cấu trúc bộ đệm vòng (Circular Buffer). Đây chính là dữ liệu đầu vào cốt lõi để mô hình TinyML phân tích cử động trong Phase 2.
-*   **Batching Mode**: Thay vì xử lý và truyền gói tin MQTT từng mẫu đơn lẻ (100 lần mỗi giây gây quá tải đường truyền), dịch vụ gom đủ `IMU_BATCH_SIZE = 50` mẫu (0.5 giây dữ liệu) rồi mới phát tín hiệu đóng gói gửi đi. Điều này giảm thiểu tối đa năng lượng tiêu thụ phát sóng WiFi/4G.
+*   **Cửa sổ trượt (Sliding Window)**: Có kích thước cố định `IMU_WINDOW_SIZE = 200` mẫu (tương đương 2 giây dữ liệu lịch sử chuyển động ở tần số 100Hz). Cửa sổ này liên tục cập nhật mẫu mới nhất và đẩy mẫu cũ nhất ra ngoài qua cấu trúc bộ đệm vòng (Circular Buffer). Toàn bộ 6 trục lưu trong cửa sổ đã được **chuẩn hóa về thang (-1, 1)** để làm đầu vào trực tiếp cho mô hình TinyML đã quantize INT8.
+*   **Batching Mode (chỉ ở STATE_STREAMING)**: Thay vì xử lý và truyền gói tin MQTT từng mẫu đơn lẻ (100 lần mỗi giây gây quá tải đường truyền), dịch vụ gom đủ `IMU_BATCH_SIZE = 50` mẫu (0.5 giây dữ liệu) rồi mới phát tín hiệu đóng gói gửi đi. Batch chỉ được gom khi hệ thống ở `STATE_STREAMING`; dữ liệu trong batch **không phải dữ liệu thô** mà đã được đổi hệ trục (Body frame), lọc Kalman 1D và scale lại về `int16_t` để đồng nhất với dữ liệu inference của TinyML. Điều này giảm thiểu tối đa năng lượng tiêu thụ phát sóng WiFi/4G.
 
 ```c
+// Sliding window chứa 6 trục IMU đã chuẩn hóa về (-1, 1) cho TinyML INT8
 typedef struct {
     float ax[IMU_WINDOW_SIZE];
     float ay[IMU_WINDOW_SIZE];
@@ -59,10 +63,26 @@ typedef struct {
 } imu_window_t;
 ```
 
+Bên cạnh `imu_window_t` (đầu vào cho inference), service còn định nghĩa hai kiểu dữ liệu phục vụ luồng streaming qua callback:
+
+```c
+// Một mẫu IMU 6 trục đã đổi trục + lọc Kalman + scale lại int16
+typedef struct __attribute__((packed)) {
+    int16_t ax, ay, az;
+    int16_t gx, gy, gz;
+} imu_stream_data_t;
+
+// Gói batch chứa tối đa IMU_BATCH_SIZE mẫu, là kiểu dữ liệu callback nhận được
+typedef struct {
+    imu_stream_data_t data[IMU_BATCH_SIZE];
+    uint16_t count;
+} imu_batch_data_t;
+```
+
 ---
 
 ## 3. HƯỚNG DẪN SỬ DỤNG API
-Các hàm công bố trong [imu_service.h](file:///d:/datn/firmware/components/svc_imu/include/imu_service.h):
+Các hàm công bố trong [imu_service.h](include/imu_service.h):
 
 ### 3.1 Khởi tạo dịch vụ
 ```c
@@ -70,6 +90,7 @@ esp_err_t imu_service_init(gpio_num_t int_pin);
 ```
 *   Khởi tạo driver `drv_mpu6050`, cấu hình chân ngắt GPIO vật lý nối với MPU6050.
 *   Thiết lập hiệu chuẩn Gyro tĩnh.
+*   **Hot Start**: Sau khi calibrate, service đọc một mẫu thực rồi seed thẳng giá trị ban đầu cho cả Kalman Pitch (`kal_pitch.angle`) lẫn 6 bộ Kalman 1D (`kf_ax..kf_gz`), tránh hiện tượng ramp-up từ 0 trong các giây đầu.
 *   Tạo Task điều phối FreeRTOS `imu_task` với mức độ ưu tiên cao (`Priority 10`) để xử lý thời gian thực nhanh nhất.
 
 ### 3.2 Lấy dữ liệu tư thế (Pitch) tức thời
@@ -112,10 +133,10 @@ void app_main(void) {
 ### 4.2 Lấy dữ liệu góc từ một Task hiển thị/điều khiển khác
 ```c
 void display_task(void *pvParameters) {
-    float r, p;
+    float p;
     while(1) {
-        imu_service_get_latest_angles(&r, &p);
-        ESP_LOGI("DISPLAY", "Current Roll: %.2f, Pitch: %.2f", r, p);
+        imu_service_get_latest_pitch(&p);
+        ESP_LOGI("DISPLAY", "Current Pitch: %.2f", p);
         vTaskDelay(pdMS_TO_TICKS(500)); // Cập nhật màn hình mỗi 500ms
     }
 }

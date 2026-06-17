@@ -37,8 +37,22 @@ void app_main(void)
     sys_manager_init();
 
     // 3. Khởi tạo các Service thực tế cho Mạng và Cloud
-    ESP_LOGI(TAG, "Initializing Network Service...");
+#ifdef NETWORK_USE_CELLULAR
+    ESP_LOGI(TAG, "Initializing Network Service (4G LTE / PPPoS)...");
+    svc_network_cellular_cfg_t cell_cfg = {
+        .apn = A7680C_APN,
+        .user = A7680C_APN_USER,
+        .pass = A7680C_APN_PASS,
+        .uart_port = UART_PORT,
+        .tx_pin = A7680C_TX_PIN,
+        .rx_pin = A7680C_RX_PIN,
+        .pwrkey_pin = A7680C_PWRKEY_PIN,
+    };
+    svc_network_init_cellular(&cell_cfg);
+#else
+    ESP_LOGI(TAG, "Initializing Network Service (WiFi STA)...");
     svc_network_init(CONFIG_WIFI_SSID, CONFIG_WIFI_PASSWORD);
+#endif
 
     ESP_LOGI(TAG, "Initializing Cloud Service...");
     svc_cloud_init(CONFIG_MQTT_BROKER_URI, CONFIG_DEVICE_ID, CONFIG_MQTT_USERNAME, CONFIG_MQTT_PASSWORD);

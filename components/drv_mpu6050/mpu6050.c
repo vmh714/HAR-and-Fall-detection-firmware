@@ -21,6 +21,10 @@ typedef struct
 
 static mpu6050_device_t mpu6050_dev;
 
+/**
+ * @brief Khởi tạo MPU6050: gắn thiết bị vào bus I2C, kiểm tra WHO_AM_I và đánh thức cảm biến.
+ * @param bus_handle Handle của bus I2C master đã được khởi tạo trước đó.
+ */
 void mpu6050_init(i2c_master_bus_handle_t bus_handle)
 {
     // 1. Khai báo cấu hình riêng cho thiết bị MPU6050
@@ -55,6 +59,11 @@ void mpu6050_init(i2c_master_bus_handle_t bus_handle)
     ESP_ERROR_CHECK(err);
     ESP_LOGI(TAG, "MPU6050 wake up success, PLL GX are chossen for clock source!");
 }
+
+/**
+ * @brief Cấu hình MPU6050: dải đo (FS), bộ lọc DLPF, sample rate, quản lý nguồn, ngắt và FIFO.
+ * @param mpu6050_cfg Con trỏ tới cấu trúc cấu hình mong muốn.
+ */
 void mpu6050_config(const mpu6050_config_t *mpu6050_cfg)
 {
     uint8_t data_transmit[2];
@@ -75,17 +84,17 @@ void mpu6050_config(const mpu6050_config_t *mpu6050_cfg)
     {
         uint16_t gyro_rate = 8000; // Mặc định là 8kHz nếu tắt DLPF (DLPF_CFG = 0 hoặc 7)
 
-        // Nếu DLPF được bật (từ 1 đến 6), Gyro Output Rate tự động chốt ở 1kHz
+        /// Nếu DLPF được bật (từ 1 đến 6), Gyro Output Rate tự động chốt ở 1kHz
         if (mpu6050_cfg->dlpf_cfg > 0 && mpu6050_cfg->dlpf_cfg < 7)
         {
             gyro_rate = 1000;
         }
 
-        // Áp dụng công thức: SMPLRT_DIV = (Gyro_Rate / Sample_Rate) - 1
+        /// Áp dụng công thức: SMPLRT_DIV = (Gyro_Rate / Sample_Rate) - 1
         // Dùng biến uint32_t tạm thời để tránh tràn số âm khi tính toán
         uint32_t div = (gyro_rate / mpu6050_cfg->sample_rate_hz) - 1;
 
-        // BẢO VỆ PHẦN CỨNG: Thanh ghi 0x19 chỉ chứa được 8 bit (Max = 255)
+        /// BẢO VỆ PHẦN CỨNG: Thanh ghi 0x19 chỉ chứa được 8 bit (Max = 255)
         if (div > 255)
         {
             div = 255;
@@ -184,6 +193,12 @@ void mpu6050_config(const mpu6050_config_t *mpu6050_cfg)
     }
     mpu6050_dev.current_config = *mpu6050_cfg;
 }
+
+/**
+ * @brief Chuyển dữ liệu thô sang đơn vị vật lý (g, deg/s, °C) dựa trên SSF của cấu hình hiện tại.
+ * @param raw  Con trỏ tới dữ liệu thô đầu vào.
+ * @param data Con trỏ tới cấu trúc nhận dữ liệu đã quy đổi.
+ */
 void mpu6050_raw_to_float(const mpu6050_data_raw_t *raw, mpu6050_data_t *data)
 {
     float a_ssf = accel_ssf[mpu6050_dev.current_config.accel_fs];
@@ -193,7 +208,7 @@ void mpu6050_raw_to_float(const mpu6050_data_raw_t *raw, mpu6050_data_t *data)
     data->ay = (float)raw->ay / a_ssf;
     data->az = (float)raw->az / a_ssf;
     
-    // Công thức tính nhiệt độ chuẩn từ datasheet
+    /// Công thức tính nhiệt độ chuẩn từ datasheet
     data->temp = (float)raw->temp / 340.0f + 36.53f;
 
     data->gx = (float)raw->gx / g_ssf;
@@ -201,11 +216,19 @@ void mpu6050_raw_to_float(const mpu6050_data_raw_t *raw, mpu6050_data_t *data)
     data->gz = (float)raw->gz / g_ssf;
 }
 
+/**
+ * @brief Lấy sample rate (Hz) đang được cấu hình.
+ * @return Tần số lấy mẫu hiện tại tính bằng Hz.
+ */
 uint16_t mpu6050_get_sample_rate(void)
 {
     return mpu6050_dev.current_config.sample_rate_hz;
 }
 
+/**
+ * @brief Đọc một mẫu dữ liệu thô (Accel/Temp/Gyro) qua I2C; gyro đã được trừ offset tĩnh.
+ * @return Cấu trúc dữ liệu thô của một mẫu cảm biến.
+ */
 mpu6050_data_raw_t mpu6050_read_raw()
 {
     uint8_t data_transmit = ACCEL_XOUT_H;
@@ -223,13 +246,18 @@ mpu6050_data_raw_t mpu6050_read_raw()
     int16_t raw_gy = (int16_t)(data_raw[10] << 8 | data_raw[11]);
     int16_t raw_gz = (int16_t)(data_raw[12] << 8 | data_raw[13]);
 
-    // Trừ đi sai số tĩnh (Offset)
+    /// Trừ đi sai số tĩnh (Offset) đã hiệu chỉnh từ mpu6050_calibrate_gyro()
     data.gx = raw_gx - mpu6050_dev.gyro_offset_x;
     data.gy = raw_gy - mpu6050_dev.gyro_offset_y;
     data.gz = raw_gz - mpu6050_dev.gyro_offset_z;
 
     return data;
 }
+
+/**
+ * @brief Đọc một mẫu và chuyển sang đơn vị vật lý (g, deg/s, °C).
+ * @return Cấu trúc dữ liệu đã quy đổi sang đơn vị thực.
+ */
 mpu6050_data_t mpu6050_read()
 {
     mpu6050_data_raw_t data_raw = mpu6050_read_raw();
@@ -249,6 +277,9 @@ mpu6050_data_t mpu6050_read()
 /**
  * @brief Đọc dữ liệu raw gyro trực tiếp từ thanh ghi, KHÔNG trừ offset.
  *        Dùng nội bộ cho quá trình calibration.
+ * @param gx Con trỏ nhận giá trị thô trục X.
+ * @param gy Con trỏ nhận giá trị thô trục Y.
+ * @param gz Con trỏ nhận giá trị thô trục Z.
  */
 static void mpu6050_read_raw_gyro_no_offset(int16_t *gx, int16_t *gy, int16_t *gz)
 {
@@ -260,6 +291,10 @@ static void mpu6050_read_raw_gyro_no_offset(int16_t *gx, int16_t *gy, int16_t *g
     *gz = (int16_t)(buf[12] << 8 | buf[13]);
 }
 
+/**
+ * @brief Hiệu chỉnh (calibrate) offset tĩnh của Gyro khi thiết bị đứng yên.
+ *        Lấy mẫu 2 lần (2-pass), loại mẫu nhiễu theo ngưỡng 3-sigma rồi tính mean offset.
+ */
 void mpu6050_calibrate_gyro(void)
 {
     // ----------------------------------------------------------------
@@ -276,10 +311,11 @@ void mpu6050_calibrate_gyro(void)
     // ----------------------------------------------------------------
     uint16_t sr = mpu6050_dev.current_config.sample_rate_hz;
     if (sr == 0) sr = 100; // Fallback an toàn
-    uint32_t delay_ms = (1000U / sr) + 1; // +1ms để chắc chắn mẫu mới sẵn sàng
+    /// +1ms để chắc chắn mẫu mới sẵn sàng, tránh đọc trùng mẫu cũ
+    uint32_t delay_ms = (1000U / sr) + 1;
 
-    const int WARMUP_SAMPLES = 50;   // Bỏ qua mẫu đầu để cảm biến ổn định
-    const int NUM_SAMPLES    = 200;  // Bội số 50, đủ chính xác (noise ~0.004°/s), tiết kiệm ~3.5s
+    const int WARMUP_SAMPLES = 50;   /// Bỏ qua mẫu đầu để cảm biến ổn định
+    const int NUM_SAMPLES    = 200;  /// Bội số 50, đủ chính xác (noise ~0.004°/s), tiết kiệm ~3.5s
 
     ESP_LOGI(TAG, "Gyro calibration: %d samples @ %dHz (delay %lums). Hold still!",
              NUM_SAMPLES, sr, (unsigned long)delay_ms);
@@ -299,8 +335,8 @@ void mpu6050_calibrate_gyro(void)
     //         Dùng để phát hiện outlier (mẫu bị nhiễu / rung tay)
     // ----------------------------------------------------------------
     int32_t  sum_gx = 0, sum_gy = 0, sum_gz = 0;
-    
-    // Cấp phát mảng trên Heap để tránh Stack Overflow
+
+    /// Cấp phát mảng trên Heap để tránh Stack Overflow
     int16_t *samples_x = (int16_t *)malloc(NUM_SAMPLES * sizeof(int16_t));
     int16_t *samples_y = (int16_t *)malloc(NUM_SAMPLES * sizeof(int16_t));
     int16_t *samples_z = (int16_t *)malloc(NUM_SAMPLES * sizeof(int16_t));
@@ -339,12 +375,12 @@ void mpu6050_calibrate_gyro(void)
         var_y += (int64_t)dy * dy;
         var_z += (int64_t)dz * dz;
     }
-    // std_dev tính bằng integer sqrt (dùng threshold bình phương để tránh sqrt)
-    // Ngưỡng = 9 * variance / N (tương đương 3-sigma bình phương)
+    /// std_dev tính bằng integer sqrt (dùng threshold bình phương để tránh sqrt)
+    /// Ngưỡng = 9 * variance / N (tương đương 3-sigma bình phương)
     int64_t thr_x = 9 * (var_x / NUM_SAMPLES);
     int64_t thr_y = 9 * (var_y / NUM_SAMPLES);
     int64_t thr_z = 9 * (var_z / NUM_SAMPLES);
-    // Đặt mức tối thiểu để tránh thr = 0 khi noise quá nhỏ
+    /// Đặt mức tối thiểu để tránh thr = 0 khi noise quá nhỏ
     if (thr_x < 100) thr_x = 100;
     if (thr_y < 100) thr_y = 100;
     if (thr_z < 100) thr_z = 100;
@@ -360,7 +396,7 @@ void mpu6050_calibrate_gyro(void)
         int32_t dx = (int32_t)samples_x[i] - mean_x;
         int32_t dy = (int32_t)samples_y[i] - mean_y;
         int32_t dz = (int32_t)samples_z[i] - mean_z;
-        // Loại mẫu nếu bất kỳ trục nào vượt ngưỡng 3-sigma
+        /// Loại mẫu nếu bất kỳ trục nào vượt ngưỡng 3-sigma
         if ((int64_t)dx*dx > thr_x ||
             (int64_t)dy*dy > thr_y ||
             (int64_t)dz*dz > thr_z)
@@ -373,7 +409,7 @@ void mpu6050_calibrate_gyro(void)
         valid_count++;
     }
 
-    // Nếu quá nhiều outlier (thiết bị bị rung quá mạnh) → fallback về mean đơn giản
+    /// Nếu quá nhiều outlier (thiết bị bị rung quá mạnh) → fallback về mean đơn giản
     if (valid_count < NUM_SAMPLES / 2)
     {
         ESP_LOGW(TAG, "Too many outliers (%d valid / %d). Device may have moved! Using simple mean.",
@@ -407,6 +443,10 @@ void mpu6050_calibrate_gyro(void)
     free(samples_y);
     free(samples_z);
 }
+
+/**
+ * @brief Reset bộ đệm FIFO của MPU6050 bằng cách bật bit FIFO_RESET trong thanh ghi USER_CTRL.
+ */
 void mpu6050_reset_fifo(void)
 {
     uint8_t data_transmit[2] = {USER_CTRL, 0x00};
@@ -418,6 +458,12 @@ void mpu6050_reset_fifo(void)
     vTaskDelay(pdMS_TO_TICKS(10)); // Đợi reset hoàn tất
 }
 
+/**
+ * @brief Đọc nhiều gói tin (packet) từ FIFO và phân giải vào mảng dữ liệu thô.
+ * @param data_array Mảng nhận dữ liệu thô đã phân giải.
+ * @param count      Vào: số gói tin tối đa muốn đọc; Ra: số gói tin thực tế đã đọc.
+ * @return ESP_OK nếu thành công; mã lỗi esp_err_t tương ứng nếu thất bại.
+ */
 esp_err_t mpu6050_read_fifo(mpu6050_data_raw_t *data_array, uint16_t *count)
 {
     // 1. Tính toán kích thước 1 gói tin (Packet Size)
@@ -438,7 +484,7 @@ esp_err_t mpu6050_read_fifo(mpu6050_data_raw_t *data_array, uint16_t *count)
     ESP_ERROR_CHECK(i2c_master_transmit_receive(mpu6050_dev.i2c_dev, &count_reg, 1, count_data, 2, 100));
     uint16_t bytes_in_fifo = (count_data[0] << 8) | count_data[1];
 
-    // Phát hiện FIFO Tràn (Overflow) gây lệch byte (out-of-sync)
+    /// Phát hiện FIFO Tràn (Overflow) gây lệch byte (out-of-sync): FIFO đầy 1024 byte → reset
     if (bytes_in_fifo == 1024)
     {
         ESP_LOGW("MPU6050", "FIFO Overflow detected! Resetting FIFO to prevent byte misalignment.");
@@ -446,7 +492,7 @@ esp_err_t mpu6050_read_fifo(mpu6050_data_raw_t *data_array, uint16_t *count)
         *count = 0;
         return ESP_OK;
     }
-    // Phát hiện FIFO bị lệch byte (không chia hết cho packet_size) do đọc sót
+    /// Phát hiện FIFO bị lệch byte (không chia hết cho packet_size) do đọc sót → reset
     else if (bytes_in_fifo % packet_size != 0)
     {
         ESP_LOGW("MPU6050", "FIFO Misaligned (bytes: %d, packet: %d). Resetting...", bytes_in_fifo, packet_size);
@@ -504,7 +550,7 @@ esp_err_t mpu6050_read_fifo(mpu6050_data_raw_t *data_array, uint16_t *count)
             data_array[i].gz = (int16_t)(buffer[offset + 4] << 8 | buffer[offset + 5]);
             offset += 6;
 
-            // Trừ đi Offset sau khi đọc từ FIFO (vì FIFO lưu dữ liệu thô từ cảm biến)
+            /// Trừ đi Offset sau khi đọc từ FIFO (vì FIFO lưu dữ liệu thô từ cảm biến)
             data_array[i].gx -= mpu6050_dev.gyro_offset_x;
             data_array[i].gy -= mpu6050_dev.gyro_offset_y;
             data_array[i].gz -= mpu6050_dev.gyro_offset_z;

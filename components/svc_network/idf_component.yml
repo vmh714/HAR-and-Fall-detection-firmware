@@ -1,0 +1,3 @@
+## Phụ thuộc của svc_network — kéo esp_modem (PPPoS cho A7680C) qua IDF Component Manager.
+dependencies:
+  espressif/esp_modem: "^1.1.0"

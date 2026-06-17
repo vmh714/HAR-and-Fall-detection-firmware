@@ -56,11 +56,14 @@ typedef enum
     DLPF_CFG_REVERSED = 7
 } mpu6050_dlpf_t;
 
+/// Sensitivity Scale Factor (SSF) cho Gyro theo datasheet: raw_LSB / SSF = deg/s.
+/// Dải đo càng rộng thì SSF càng nhỏ (độ phân giải thấp hơn).
 static const float gyro_ssf[] = {
     [GYRO_FS_250DPS] = 131.0f,
     [GYRO_FS_500DPS] = 65.5f,
     [GYRO_FS_1000DPS] = 32.8f,
     [GYRO_FS_2000DPS] = 16.4f};
+/// SSF cho Accel theo datasheet: raw_LSB / SSF = g. Dải đo càng rộng thì SSF càng nhỏ.
 static const float accel_ssf[] = {
     [ACCEL_FS_2G] = 16384.0f,
     [ACCEL_FS_4G] = 8192.0f,
@@ -123,15 +126,59 @@ typedef struct
     float gx, gy, gz;
 } mpu6050_data_t;
 
-void mpu6050_init();
+/**
+ * @brief Khởi tạo MPU6050: gắn thiết bị vào bus I2C, kiểm tra WHO_AM_I và đánh thức cảm biến.
+ * @param bus_handle Handle của bus I2C master đã được khởi tạo trước đó.
+ */
+void mpu6050_init(i2c_master_bus_handle_t bus_handle);
+
+/**
+ * @brief Cấu hình MPU6050: dải đo (FS), bộ lọc DLPF, sample rate, quản lý nguồn, ngắt và FIFO.
+ * @param mpu6050_cfg Con trỏ tới cấu trúc cấu hình mong muốn.
+ */
 void mpu6050_config(const mpu6050_config_t *mpu6050_cfg);
+
+/**
+ * @brief Đọc một mẫu dữ liệu thô (raw) Accel/Temp/Gyro qua I2C (gyro đã trừ offset).
+ * @return Cấu trúc dữ liệu thô của một mẫu cảm biến.
+ */
 mpu6050_data_raw_t mpu6050_read_raw();
+
+/**
+ * @brief Đọc một mẫu và chuyển sang đơn vị vật lý (g, deg/s, °C).
+ * @return Cấu trúc dữ liệu đã quy đổi sang đơn vị thực.
+ */
 mpu6050_data_t mpu6050_read();
+
+/**
+ * @brief Chuyển dữ liệu thô sang đơn vị vật lý dựa trên SSF của cấu hình hiện tại.
+ * @param raw  Con trỏ tới dữ liệu thô đầu vào.
+ * @param data Con trỏ tới cấu trúc nhận dữ liệu đã quy đổi.
+ */
 void mpu6050_raw_to_float(const mpu6050_data_raw_t *raw, mpu6050_data_t *data);
+
+/**
+ * @brief Reset bộ đệm FIFO của MPU6050 (bật bit FIFO_RESET trong USER_CTRL).
+ */
 void mpu6050_reset_fifo(void);
+
+/**
+ * @brief Lấy sample rate (Hz) đang được cấu hình.
+ * @return Tần số lấy mẫu hiện tại tính bằng Hz.
+ */
 uint16_t mpu6050_get_sample_rate(void);
 
+/**
+ * @brief Hiệu chỉnh (calibrate) offset tĩnh của Gyro khi thiết bị đứng yên.
+ */
 void mpu6050_calibrate_gyro(void);
+
+/**
+ * @brief Đọc nhiều gói tin (packet) từ FIFO và phân giải vào mảng dữ liệu thô.
+ * @param data_array Mảng nhận dữ liệu thô đã phân giải.
+ * @param count      Vào: số gói tin tối đa muốn đọc; Ra: số gói tin thực tế đã đọc.
+ * @return ESP_OK nếu thành công; mã lỗi esp_err_t tương ứng nếu thất bại.
+ */
 esp_err_t mpu6050_read_fifo(mpu6050_data_raw_t *data_array, uint16_t *count);
 
 #endif //_MPU6050_H_

@@ -1,6 +1,6 @@
 #include "tflite_wrapper.h"
 #include <stdio.h>
-#include "esp_heap_caps.h"  // Thêm thư viện để cấp phát PSRAM
+#include "esp_heap_caps.h"  // Thư viện cấp phát bộ nhớ PSRAM
 #include "esp_log.h"
 #include "esp_timer.h"
 // #include <math.h>
@@ -18,14 +18,19 @@ tflite::MicroInterpreter* interpreter = nullptr;
 TfLiteTensor* input = nullptr;
 TfLiteTensor* output = nullptr;
 
-// Tăng kích thước lên 1MB
+/// Tensor arena 100KB, cấp phát động trên PSRAM (xem tflite_init).
 constexpr int kTensorArenaSize = 100 * 1024;
 
 // uint8_t tensor_arena[kTensorArenaSize];
-// Đổi từ mảng tĩnh sang con trỏ để cấp phát động
+/// Dùng con trỏ thay cho mảng tĩnh để cấp phát động arena trên PSRAM.
 uint8_t* tensor_arena = nullptr;
 }  // namespace
 
+/**
+ * @brief Khởi tạo mô hình TFLite Micro: cấp phát arena trên PSRAM, load model,
+ *        đăng ký toán tử và cấp phát tensor.
+ * @return 0 nếu thành công, -1 nếu thất bại ở bất kỳ bước nào.
+ */
 int tflite_init(void) {
     tflite::InitializeTarget();
 
@@ -51,6 +56,8 @@ int tflite_init(void) {
     }
 
     // 3. Đăng ký các toán tử cần thiết cho model v25 (đã được trích xuất)
+    /// MicroMutableOpResolver<15>: chỉ đăng ký đúng 15 op model dùng để tiết
+    /// kiệm RAM/flash thay vì nạp toàn bộ op (AllOpsResolver).
     static tflite::MicroMutableOpResolver<15> resolver;
     resolver.AddAdd();
     resolver.AddConcatenation();
@@ -80,7 +87,7 @@ int tflite_init(void) {
         return -1;
     }
 
-    // In ra lượng RAM thực tế yêu cầu
+    // In ra lượng RAM thực tế yêu cầu để đối chiếu với kTensorArenaSize
     ESP_LOGI(TAG, "================================================");
     ESP_LOGI(TAG, "TFLITE ARENA CALCULATION RESULTS:");
     ESP_LOGI(TAG, "Total Arena Size Configured: %d bytes (PSRAM)",
@@ -98,6 +105,9 @@ int tflite_init(void) {
     return 0;
 }
 
+/**
+ * @brief Chạy inference thử với dữ liệu giả định (toàn 0) và đo thời gian thực thi.
+ */
 void tflite_run_inference(void) {
     if (interpreter == nullptr || input == nullptr || output == nullptr) {
         ESP_LOGE(TAG, "Interpreter not initialized!");
@@ -131,10 +141,14 @@ void tflite_run_inference(void) {
     ESP_LOGI(TAG, "================================================");
 }
 
+/**
+ * @brief Tính kích thước (byte) của tensor đầu vào theo định dạng FLOAT32.
+ * @return Số byte buffer đầu vào, hoặc 0 nếu interpreter chưa khởi tạo.
+ */
 int get_input_bytes(void) {
     if (input != nullptr) {
-        // Luôn trả về số byte của mảng FLOAT32 (để tương thích với data thật từ
-        // IMU/Python)
+        /// Luôn trả về số byte theo FLOAT32 để tương thích với data thật từ
+        /// IMU/Python (việc quantize sang INT8 thực hiện ở inference).
         int elements = 1;
         for (int i = 0; i < input->dims->size; ++i) {
             elements *= input->dims->data[i];
@@ -144,6 +158,13 @@ int get_input_bytes(void) {
     return 0;
 }
 
+/**
+ * @brief Chạy inference với dữ liệu IMU thực tế: quantize đầu vào, invoke model,
+ *        dequantize đầu ra và chọn lớp dự đoán (ưu tiên Fall).
+ * @param rx_data Mảng float đầu vào đã chuẩn hóa về [-1.0, 1.0].
+ * @param num_bytes Kích thước mảng đầu vào tính bằng byte.
+ * @return Kết quả phân loại; is_valid = false nếu sai kích thước hoặc invoke lỗi.
+ */
 ai_inference_result_t tflite_run_inference_with_data(float* rx_data,
                                                      size_t num_bytes) {
     ai_inference_result_t result = {AI_CLASS_UNKNOWN, 0.0f, 0.0f, 0, false};
@@ -169,9 +190,8 @@ ai_inference_result_t tflite_run_inference_with_data(float* rx_data,
     // Ép kiểu (Quantize) từ dữ liệu Float sang INT8
     if (input->type == kTfLiteInt8) {
         for (int i = 0; i < elements; i++) {
-            // LƯU Ý: Dữ liệu từ imu_service đã được chuẩn hóa về khoảng
-            // [-1.0, 1.0] Nên chúng ta KHÔNG cần kẹp và chia 8.0g hoặc
-            // 2000.0dps ở đây nữa.
+            /// Dữ liệu từ imu_service đã được chuẩn hóa về khoảng [-1.0, 1.0],
+            /// nên KHÔNG cần kẹp và chia 8.0g hoặc 2000.0dps ở đây nữa.
             float val = rx_data[i];
 
             // Kẹp cứng vào giới hạn an toàn đề phòng ngoại lệ
@@ -210,7 +230,7 @@ ai_inference_result_t tflite_run_inference_with_data(float* rx_data,
     }
 
     // --- Giải Lượng tử hóa (Dequantize) Đầu Ra ---
-    float probs[10];  // Giả sử model có tối đa 10 class
+    float probs[10];  // Buffer xác suất, giả định model có tối đa 10 class
     if (num_classes > 10) num_classes = 10;
 
     for (int i = 0; i < num_classes; i++) {
@@ -231,7 +251,8 @@ ai_inference_result_t tflite_run_inference_with_data(float* rx_data,
         }
     }
 
-    // --- Cập nhật: Logic 25% Threshold cho Fall ---
+    /// Ưu tiên an toàn: ép predicted_class = Fall khi xác suất Fall >= 0.6 (60%),
+    /// kể cả khi không phải lớp có xác suất cao nhất — giảm bỏ sót ca té ngã.
     if (num_classes > AI_CLASS_FALL && probs[AI_CLASS_FALL] >= 0.6f) {
         predicted_class_idx = AI_CLASS_FALL;
     }

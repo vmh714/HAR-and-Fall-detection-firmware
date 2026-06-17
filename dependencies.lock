@@ -26,7 +26,7 @@ dependencies:
   idf:
     source:
       type: idf
-    version: 5.4.1
+    version: 5.4.4
 direct_dependencies:
 - espressif/esp-tflite-micro
 manifest_hash: e1f5fcfc4dca614a78e032906029db051ed22c951e4a7f104019dc013c10f380

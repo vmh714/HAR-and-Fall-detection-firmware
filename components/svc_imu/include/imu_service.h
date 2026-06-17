@@ -4,7 +4,8 @@
 #include "driver/gpio.h"
 #include "mpu6050.h"
 
-// Kích thước của Sliding Window (200 mẫu = 2 giây ở 100Hz)
+/// Sliding Window 200 mẫu = 2 giây ở 100Hz — kích thước input cố định của model TinyML
+/// (không đổi mà không retrain). Trượt 50 mẫu (0.5s) mỗi lần xử lý một batch.
 #define IMU_WINDOW_SIZE 200
 #define IMU_BATCH_SIZE 50
 
@@ -18,7 +19,8 @@ typedef struct {
     uint16_t count;
 } imu_batch_data_t;
 
-// Sliding window chứa 6 trục IMU đã chuẩn hóa về (-1, 1) cho TinyML INT8
+/// Sliding window chứa 6 trục IMU đã lọc Kalman và chuẩn hóa về (-1, 1):
+/// định dạng input trực tiếp cho model TinyML đã quantize INT8.
 typedef struct {
     float ax[IMU_WINDOW_SIZE];
     float ay[IMU_WINDOW_SIZE];
@@ -30,15 +32,32 @@ typedef struct {
 } imu_window_t;
 
 /**
- * @brief Khởi tạo IMU Service, bao gồm cấu hình GPIO Ngắt, tạo Task xử lý
- * 
- * @param int_pin Chân GPIO được nối với chân INT của MPU6050
- * @return esp_err_t 
+ * @brief Khởi tạo IMU Service: cấu hình MPU6050, bộ lọc Kalman, PCNT đếm xung INT
+ *        và tạo task xử lý dữ liệu.
+ * @param int_pin Chân GPIO được nối với chân INT của MPU6050.
+ * @return ESP_OK nếu khởi tạo thành công.
  */
 esp_err_t imu_service_init(gpio_num_t int_pin);
+
+/**
+ * @brief Lấy giá trị góc pitch mới nhất (đã lọc Kalman) để xác định tư thế.
+ * @param pitch Con trỏ nhận giá trị pitch (đơn vị độ).
+ */
 void imu_service_get_latest_pitch(float *pitch);
 
 typedef esp_err_t (*imu_batch_callback_t)(const void *batch_data);
+
+/**
+ * @brief Đăng ký callback nhận một lô (batch) dữ liệu IMU đã tiền xử lý khi ở STATE_STREAMING.
+ * @param cb Hàm callback được gọi mỗi khi gom đủ IMU_BATCH_SIZE mẫu.
+ */
 void imu_service_register_batch_callback(imu_batch_callback_t cb);
+
+/**
+ * @brief Lấy số bước chân tích lũy (đi bộ/chạy) đếm được trên thiết bị (pedometer).
+ * @param walk Con trỏ nhận số bước đi bộ (có thể NULL).
+ * @param run  Con trỏ nhận số bước chạy (có thể NULL).
+ */
+void imu_service_get_steps(uint32_t *walk, uint32_t *run);
 
 #endif // IMU_SERVICE_H
