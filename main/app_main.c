@@ -15,6 +15,7 @@
 #include "driver/i2c_master.h"
 #include "mpu6050.h"
 #include "imu_service.h"
+#include "drv_battery.h"
 
 static const char *TAG = "MAIN_APP";
 
@@ -35,6 +36,9 @@ void app_main(void)
 
     // 2. Khởi tạo FSM Trung tâm (Event Loop)
     sys_manager_init();
+
+    // Battery monitor (ADC) — đọc % pin cho telemetry
+    drv_battery_init(BATTERY_ADC_GPIO, BATTERY_DIVIDER_RATIO);
 
     // 3. Khởi tạo các Service thực tế cho Mạng và Cloud
 #ifdef NETWORK_USE_CELLULAR

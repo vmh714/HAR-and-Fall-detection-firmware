@@ -85,7 +85,7 @@ MPU6050 (100Hz ngắt)
 
 | Topic | Hướng | Mô tả |
 |---|---|---|
-| `eldercare/{id}/alert` | Publish | Cảnh báo té ngã, QoS 1 — payload `{"alert":"FALL","ts":<ms>}` |
+| `eldercare/{id}/alert/fall` | Publish | Cảnh báo té ngã, QoS 1 — payload `{user_name, message, confidence}` |
 | `eldercare/{id}/status` | Publish | Telemetry định kỳ (pin, bước chân, state, ai_pred, ...), QoS 0 — chỉ ở STATE_NORMAL |
 | `eldercare/{id}/imu_stream` | Publish | IMU batch đã tiền xử lý (chỉ STATE_STREAMING), QoS 0 |
 | `eldercare/{id}/command` | Subscribe | Nhận lệnh từ backend (start/stop stream, set_interval, OTA), QoS 1 |

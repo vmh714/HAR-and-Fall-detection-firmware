@@ -13,6 +13,7 @@
 #include "mqtt_client.h"
 #include "sys_manager.h"
 #include "svc_ai.h"
+#include "drv_battery.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -271,7 +272,8 @@ static void svc_cloud_task(void* pvParameters)
                 {
                     uint32_t walk_steps = 0, run_steps = 0;
                     imu_service_get_steps(&walk_steps, &run_steps);
-                    cJSON_AddNumberToObject(root, "battery", 100);  // Placeholder (chờ ADC đọc pin)
+                    int batt = drv_battery_read_percent();
+                    cJSON_AddNumberToObject(root, "battery", batt < 0 ? 0 : batt);
                     /// walk_steps/run_steps tách riêng để backend tính distance đúng theo loại
                     /// (đi bộ 0.415 vs chạy 0.5 × chiều cao); "steps" = tổng để tương thích.
                     cJSON_AddNumberToObject(root, "walk_steps", walk_steps);
@@ -333,13 +335,17 @@ static void ai_event_handler(void* arg, esp_event_base_t event_base,
             cJSON* root = cJSON_CreateObject();
             if (root)
             {
-                cJSON_AddStringToObject(root, "alert", "FALL");
-                cJSON_AddNumberToObject(root, "ts", now / 1000);
+                /// Payload khớp AlertPayload của backend (user_name/message bắt buộc
+                /// dù backend chỉ dùng confidence). Bỏ timestamp: firmware chưa có RTC
+                /// → backend tự dùng thời gian server.
+                cJSON_AddStringToObject(root, "user_name", "");
+                cJSON_AddStringToObject(root, "message", "Fall detected");
+                cJSON_AddNumberToObject(root, "confidence", svc_ai_get_latest_confidence());
                 char* json_str = cJSON_PrintUnformatted(root);
                 if (json_str)
                 {
                     char topic[128];
-                    snprintf(topic, sizeof(topic), "eldercare/%s/alert",
+                    snprintf(topic, sizeof(topic), "eldercare/%s/alert/fall",
                              s_device_id);
                     /// Cảnh báo ngã dùng QoS 1: đây là dữ liệu sống còn, bắt buộc
                     /// đảm bảo đến được broker ít nhất một lần (khác với telemetry QoS 0).

@@ -34,4 +34,8 @@
 #define A7680C_RX_PIN GPIO_NUM_44
 #define A7680C_PWRKEY_PIN GPIO_NUM_38
 #define UART_PORT UART_NUM_2
+
+// Battery monitor — ADC đọc qua cầu phân áp 2× 100kΩ (Vpin = Vadc × 2)
+#define BATTERY_ADC_GPIO GPIO_NUM_1   // TODO: đổi sang chân ADC thực tế sau khi hàn xong
+#define BATTERY_DIVIDER_RATIO 2.0f
 #endif  // HARDWARE_CONFIG_H
