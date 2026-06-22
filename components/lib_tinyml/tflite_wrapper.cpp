@@ -57,25 +57,21 @@ int tflite_init(void) {
         return -1;
     }
 
-    // 3. Đăng ký các toán tử cần thiết cho model v25 (đã được trích xuất)
-    /// MicroMutableOpResolver<15>: chỉ đăng ký đúng 15 op model dùng để tiết
-    /// kiệm RAM/flash thay vì nạp toàn bộ op (AllOpsResolver).
-    static tflite::MicroMutableOpResolver<15> resolver;
-    resolver.AddAdd();
+    // 3. Đăng ký đúng các toán tử model v30_optimize sử dụng (trích từ
+    //    model_data.h — quét Flatbuffer bằng gói `tflite`, gồm cả op ẩn
+    //    MAX_POOL_2D ép từ Conv1D).
+    /// MicroMutableOpResolver<8>: chỉ đăng ký đúng 8 op model dùng để tiết
+    /// kiệm RAM/flash thay vì nạp toàn bộ op (AllOpsResolver). Số op phải khớp
+    /// MODEL_NUM_OPS trong model_data.h — thiếu op → ESP32 crash lúc inference.
+    static tflite::MicroMutableOpResolver<8> resolver;
     resolver.AddConcatenation();
     resolver.AddConv2D();
     resolver.AddDepthwiseConv2D();
-    resolver.AddExpandDims();
     resolver.AddFullyConnected();
-    resolver.AddLogistic();
+    resolver.AddMaxPool2D();
     resolver.AddMean();
-    resolver.AddMul();
-    resolver.AddPack();
-    resolver.AddReduceMax();
     resolver.AddReshape();
-    resolver.AddShape();
     resolver.AddSoftmax();
-    resolver.AddStridedSlice();
 
     // 4. Build Interpreter
     static tflite::MicroInterpreter static_interpreter(
