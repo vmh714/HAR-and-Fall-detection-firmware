@@ -18,6 +18,12 @@ esp_err_t svc_network_init(const char *ssid, const char *pass);
  */
 bool svc_network_is_connected(void);
 
+/**
+ * @brief Lấy RSSI của kết nối hiện tại.
+ * @return rssi (dBm) nếu dùng WiFi, 0 nếu dùng 4G LTE (đợi làm CMUX sau).
+ */
+int svc_network_get_rssi(void);
+
 /// Cấu hình phần cứng + APN cho đường mạng 4G LTE (PPPoS qua A7680C).
 typedef struct {
     const char *apn;   ///< APN nhà mạng (vd Viettel "v-internet").

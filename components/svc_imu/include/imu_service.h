@@ -43,7 +43,7 @@ esp_err_t imu_service_init(gpio_num_t int_pin);
  * @brief Lấy giá trị góc pitch mới nhất (đã lọc Kalman) để xác định tư thế.
  * @param pitch Con trỏ nhận giá trị pitch (đơn vị độ).
  */
-void imu_service_get_latest_pitch(float *pitch);
+void imu_service_get_latest_roll(float *roll);
 
 typedef esp_err_t (*imu_batch_callback_t)(const void *batch_data);
 

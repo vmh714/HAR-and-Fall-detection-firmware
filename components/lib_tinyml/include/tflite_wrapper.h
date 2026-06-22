@@ -47,6 +47,18 @@ typedef struct {
 int get_input_bytes(void);
 
 /**
+ * @brief Cập nhật ngưỡng xác suất phát hiện ngã (Fall Threshold).
+ * @param val Giá trị ngưỡng mới (thường từ 0.15 đến 0.95).
+ */
+void tflite_set_fall_threshold(float val);
+
+/**
+ * @brief Lấy ngưỡng xác suất phát hiện ngã hiện tại.
+ * @return Giá trị ngưỡng (float).
+ */
+float tflite_get_fall_threshold(void);
+
+/**
  * @brief Chạy inference với dữ liệu thực tế từ IMU và trả về kết quả phân loại.
  * @param data Con trỏ tới mảng float đầu vào (đã chuẩn hóa về [-1.0, 1.0]).
  * @param num_bytes Kích thước mảng đầu vào tính bằng byte.

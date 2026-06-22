@@ -12,6 +12,8 @@
 
 static const char* TAG = "TFLiteWrapper";
 
+static volatile float s_fall_threshold = 0.6f;
+
 namespace {
 const tflite::Model* model = nullptr;
 tflite::MicroInterpreter* interpreter = nullptr;
@@ -158,6 +160,14 @@ int get_input_bytes(void) {
     return 0;
 }
 
+void tflite_set_fall_threshold(float val) {
+    s_fall_threshold = val;
+}
+
+float tflite_get_fall_threshold(void) {
+    return s_fall_threshold;
+}
+
 /**
  * @brief Chạy inference với dữ liệu IMU thực tế: quantize đầu vào, invoke model,
  *        dequantize đầu ra và chọn lớp dự đoán (ưu tiên Fall).
@@ -251,9 +261,9 @@ ai_inference_result_t tflite_run_inference_with_data(float* rx_data,
         }
     }
 
-    /// Ưu tiên an toàn: ép predicted_class = Fall khi xác suất Fall >= 0.6 (60%),
+    /// Ưu tiên an toàn: ép predicted_class = Fall khi xác suất Fall >= s_fall_threshold,
     /// kể cả khi không phải lớp có xác suất cao nhất — giảm bỏ sót ca té ngã.
-    if (num_classes > AI_CLASS_FALL && probs[AI_CLASS_FALL] >= 0.6f) {
+    if (num_classes > AI_CLASS_FALL && probs[AI_CLASS_FALL] >= s_fall_threshold) {
         predicted_class_idx = AI_CLASS_FALL;
     }
 

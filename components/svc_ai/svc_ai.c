@@ -127,20 +127,21 @@ static void svc_ai_task(void* pvParameters)
                     result.inference_time_us / 1000.0, pred_name,
                     result.max_prob * 100.0, result.fall_prob * 100.0);
 
-                /// Nếu trạng thái là IDLE, dùng góc Pitch từ Kalman filter để
+                /// Nếu trạng thái là IDLE, dùng góc Roll từ Kalman filter để
                 /// xác định tư thế (Posture)
                 if (result.predicted_class == AI_CLASS_IDLE)
                 {
-                    float current_pitch = 0.0f;
-                    imu_service_get_latest_pitch(&current_pitch);
+                    float current_roll = 0.0f;
+                    imu_service_get_latest_roll(&current_roll);
 
-                    /// Logic cơ bản: Pitch nằm trong khoảng [-45, 45] độ ->
+                    /// Logic cơ bản: Roll nằm trong khoảng [60, 90] hoặc [-90, -60] độ ->
                     /// Đứng/Ngồi, ngoài ra là Nằm
                     bool is_stand_sit =
-                        (current_pitch > -45.0f && current_pitch < 45.0f);
-                    ESP_LOGI(TAG, "Posture: %s (Pitch: %.1f deg)",
+                        ((current_roll >= 60.0f && current_roll <= 90.0f) || 
+                         (current_roll >= -90.0f && current_roll <= -60.0f));
+                    ESP_LOGI(TAG, "Posture: %s (Roll: %.1f deg)",
                              is_stand_sit ? "Stand/Sit" : "Lying Down",
-                             current_pitch);
+                             current_roll);
                 }
 
                 if (result.predicted_class == AI_CLASS_FALL)

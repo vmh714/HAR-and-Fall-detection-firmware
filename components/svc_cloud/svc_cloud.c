@@ -13,9 +13,11 @@
 #include "mqtt_client.h"
 #include "sys_manager.h"
 #include "svc_ai.h"
+#include "svc_network.h"
 #include "drv_battery.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "tflite_wrapper.h"
 
 static const char* TAG = "SVC_CLOUD";
 
@@ -27,6 +29,10 @@ static char s_device_id[64] = {0};
 /// không dùng chung với telemetry/alert để tránh chặn lẫn nhau khi tải cao.
 static QueueHandle_t s_imu_queue = NULL;
 static uint32_t s_telemetry_interval_ms = 5000; // Mặc định 5s
+static uint64_t s_last_fall_alert_ts = 0;
+/// Cooldown chống spam alert: sau mỗi lần gửi cảnh báo ngã, im lặng cố định
+/// một khoảng thời gian để một cú ngã không bị phát hiện lặp lại tạo ra hàng loạt alert trùng.
+static uint64_t s_fall_cooldown_us = 15000000ULL;  // Mặc định 15 seconds
 
 typedef struct
 {
@@ -153,6 +159,67 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base,
                                         } else {
                                             ESP_LOGE(TAG, "Error (%s) opening NVS handle!", esp_err_to_name(err));
                                         }
+                                    }
+                                }
+                            }
+                            else if (strcmp(action_item->valuestring, "set_fall_threshold") == 0)
+                            {
+                                cJSON* val_item = cJSON_GetObjectItem(root, "val");
+                                if (cJSON_IsNumber(val_item))
+                                {
+                                    float new_threshold = val_item->valuedouble;
+                                    // Chặn giá trị hợp lệ: từ 0.15 đến 0.95
+                                    if (new_threshold >= 0.15f && new_threshold <= 0.95f)
+                                    {
+                                        ESP_LOGI(TAG, "Action: set_fall_threshold. New threshold: %.2f", new_threshold);
+                                        tflite_set_fall_threshold(new_threshold);
+                                        
+                                        /// Lưu vào NVS (lưu dạng integer phần trăm)
+                                        nvs_handle_t my_handle;
+                                        esp_err_t err = nvs_open("config", NVS_READWRITE, &my_handle);
+                                        if (err == ESP_OK) {
+                                            uint32_t thr_pct = (uint32_t)(new_threshold * 100.0f);
+                                            nvs_set_u32(my_handle, "fall_thr", thr_pct);
+                                            nvs_commit(my_handle);
+                                            nvs_close(my_handle);
+                                            ESP_LOGI(TAG, "Saved new fall threshold to NVS: %lu%%", thr_pct);
+                                        } else {
+                                            ESP_LOGE(TAG, "Error (%s) opening NVS handle!", esp_err_to_name(err));
+                                        }
+                                    }
+                                    else
+                                    {
+                                        ESP_LOGW(TAG, "Invalid fall_threshold value: %.2f. Ignored.", new_threshold);
+                                    }
+                                }
+                            }
+                            else if (strcmp(action_item->valuestring, "set_fall_cooldown") == 0)
+                            {
+                                cJSON* val_item = cJSON_GetObjectItem(root, "val");
+                                if (cJSON_IsNumber(val_item))
+                                {
+                                    uint32_t new_cooldown_sec = val_item->valueint;
+                                    // Chặn giá trị hợp lệ: từ 5s đến 300s
+                                    if (new_cooldown_sec >= 5 && new_cooldown_sec <= 300)
+                                    {
+                                        s_fall_cooldown_us = (uint64_t)new_cooldown_sec * 1000000ULL;
+                                        ESP_LOGI(TAG, "Action: set_fall_cooldown. New cooldown: %lu s", new_cooldown_sec);
+                                        
+                                        /// Lưu vào NVS
+                                        nvs_handle_t my_handle;
+                                        esp_err_t err = nvs_open("config", NVS_READWRITE, &my_handle);
+                                        if (err == ESP_OK) {
+                                            nvs_set_u32(my_handle, "fall_cd", new_cooldown_sec);
+                                            nvs_commit(my_handle);
+                                            nvs_close(my_handle);
+                                            ESP_LOGI(TAG, "Saved new fall cooldown to NVS: %lu s", new_cooldown_sec);
+                                        } else {
+                                            ESP_LOGE(TAG, "Error (%s) opening NVS handle!", esp_err_to_name(err));
+                                        }
+                                    }
+                                    else
+                                    {
+                                        ESP_LOGW(TAG, "Invalid fall_cooldown value: %lu. Ignored.", new_cooldown_sec);
                                     }
                                 }
                             }
@@ -283,6 +350,9 @@ static void svc_cloud_task(void* pvParameters)
                     cJSON_AddStringToObject(root, "ai_pred", svc_ai_get_latest_prediction());
                     cJSON_AddNumberToObject(root, "ai_conf", svc_ai_get_latest_confidence());
                     cJSON_AddNumberToObject(root, "interval", s_telemetry_interval_ms / 1000);
+                    cJSON_AddNumberToObject(root, "fall_threshold", tflite_get_fall_threshold());
+                    cJSON_AddNumberToObject(root, "fall_cooldown", s_fall_cooldown_us / 1000000ULL);
+                    cJSON_AddNumberToObject(root, "rssi", svc_network_get_rssi());
                     char* json_str = cJSON_PrintUnformatted(root);
                     if (json_str)
                     {
@@ -305,11 +375,6 @@ static void svc_cloud_task(void* pvParameters)
     }
 }
 
-static uint64_t s_last_fall_alert_ts = 0;
-/// Cooldown 15s chống spam alert: sau mỗi lần gửi cảnh báo ngã, im lặng cố định
-/// 15 giây để một cú ngã không bị phát hiện lặp lại tạo ra hàng loạt alert trùng.
-#define FALL_COOLDOWN_US (15000000ULL)  // 15 seconds
-
 /**
  * @brief Xử lý sự kiện phát hiện ngã từ svc_ai: publish cảnh báo SOS lên MQTT
  *        với cơ chế cooldown chống spam.
@@ -328,7 +393,7 @@ static void ai_event_handler(void* arg, esp_event_base_t event_base,
 
         uint64_t now = esp_timer_get_time();
         /// Chỉ gửi nếu đã qua cooldown, hoặc đây là lần ngã đầu tiên (ts == 0).
-        if (now - s_last_fall_alert_ts >= FALL_COOLDOWN_US ||
+        if (now - s_last_fall_alert_ts >= s_fall_cooldown_us ||
             s_last_fall_alert_ts == 0)
         {
             ESP_LOGW(TAG, "Fall event received! Publishing SOS alert...");
@@ -464,6 +529,19 @@ esp_err_t svc_cloud_init(const char* broker_uri, const char* client_id,
     esp_err_t err = nvs_open("config", NVS_READONLY, &my_handle);
     if (err == ESP_OK) {
         nvs_get_u32(my_handle, "tel_int", &s_telemetry_interval_ms);
+        
+        uint32_t fall_thr_pct = 60; // Mặc định 0.6
+        if (nvs_get_u32(my_handle, "fall_thr", &fall_thr_pct) == ESP_OK) {
+            tflite_set_fall_threshold((float)fall_thr_pct / 100.0f);
+            ESP_LOGI(TAG, "Loaded fall threshold from NVS: %.2f", (float)fall_thr_pct / 100.0f);
+        }
+        
+        uint32_t fall_cooldown_sec = 15; // Mặc định 15s
+        if (nvs_get_u32(my_handle, "fall_cd", &fall_cooldown_sec) == ESP_OK) {
+            s_fall_cooldown_us = (uint64_t)fall_cooldown_sec * 1000000ULL;
+            ESP_LOGI(TAG, "Loaded fall cooldown from NVS: %lu s", fall_cooldown_sec);
+        }
+        
         nvs_close(my_handle);
         ESP_LOGI(TAG, "Loaded telemetry interval from NVS: %lu ms", s_telemetry_interval_ms);
     } else {

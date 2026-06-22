@@ -7,11 +7,11 @@
 // #define NETWORK_USE_CELLULAR 1
 
 // ======================== WIFI CONFIGURATION ========================
-#define CONFIG_WIFI_SSID "MD_LAPTOP"
-#define CONFIG_WIFI_PASSWORD "11111111"
+#define CONFIG_WIFI_SSID "IT Hoc Bach Khoa"
+#define CONFIG_WIFI_PASSWORD "chungtalamotgiadinh"
 
 // ======================== 4G LTE (A7680C) APN ========================
-#define A7680C_APN "v-internet"   // Viettel
+#define A7680C_APN "v-internet"  // Viettel
 #define A7680C_APN_USER ""
 #define A7680C_APN_PASS ""
 
@@ -36,6 +36,6 @@
 #define UART_PORT UART_NUM_2
 
 // Battery monitor — ADC đọc qua cầu phân áp 2× 100kΩ (Vpin = Vadc × 2)
-#define BATTERY_ADC_GPIO GPIO_NUM_1   // TODO: đổi sang chân ADC thực tế sau khi hàn xong
+#define BATTERY_ADC_GPIO GPIO_NUM_1
 #define BATTERY_DIVIDER_RATIO 2.0f
 #endif  // HARDWARE_CONFIG_H

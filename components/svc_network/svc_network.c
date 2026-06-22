@@ -102,6 +102,20 @@ bool svc_network_is_connected(void)
     return s_connected;
 }
 
+int svc_network_get_rssi(void)
+{
+    if (s_connected) {
+        wifi_ap_record_t ap;
+        // Chỉ lấy rssi nếu cấu hình hiện tại đang là WiFi.
+        // esp_wifi_sta_get_ap_info sẽ trả về ESP_OK nếu WiFi đang kết nối.
+        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+            return ap.rssi;
+        }
+    }
+    // Nếu dùng 4G LTE (PPPoS data mode) mà chưa có CMUX, ta tạm trả về 0
+    return 0;
+}
+
 // ============================================================================
 //  ĐƯỜNG MẠNG 4G LTE (PPPoS qua A7680C + esp_modem)
 // ============================================================================

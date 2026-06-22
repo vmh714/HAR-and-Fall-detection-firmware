@@ -16,8 +16,8 @@ static const char *TAG = "IMU_SERVICE";
 static TaskHandle_t imu_task_handle = NULL;
 static pcnt_unit_handle_t pcnt_unit = NULL;
 static kalman_1d_t kf_ax, kf_ay, kf_az, kf_gx, kf_gy, kf_gz;
-static kalman_t kal_pitch; /// 2-state Kalman riêng (góc + bias) để ước lượng tư thế: nằm/đứng/ngồi
-static float last_pitch = 0;
+static kalman_t kal_roll; /// 2-state Kalman riêng (góc + bias) để ước lượng tư thế: nằm/đứng/ngồi
+static float last_roll = 0;
 static imu_window_t imu_win;
 static imu_batch_data_t s_batch_data;
 static imu_batch_callback_t s_batch_callback = NULL;
@@ -135,9 +135,9 @@ static void imu_processing_task(void *pvParameters)
                     else if (is_walk) { s_walk_steps++; s_steps_dirty = true; }
                 }
 
-                // Pitch chỉ dùng để xác định tư thế (nằm/đứng/ngồi)
-                float accel_pitch = atan2(-ax_body, sqrt(ay_body * ay_body + az_body * az_body)) * RAD_TO_DEG;
-                last_pitch = kalman_get_angle(&kal_pitch, accel_pitch, gy_body, dt);
+                /// Roll xác định tư thế (nằm/đứng/ngồi) — hợp với mounting thắt lưng phía trước.
+                float accel_roll = atan2(ay_body, sqrt(ax_body * ax_body + az_body * az_body)) * RAD_TO_DEG;
+                last_roll = kalman_get_angle(&kal_roll, accel_roll, gx_body, dt);
 
                 /// Lọc Kalman 1D từng trục IMU rồi chuẩn hóa về (-1, 1):
                 /// tiền xử lý bắt buộc để dữ liệu khớp với input của model TinyML đã quantize INT8.
@@ -201,7 +201,7 @@ static void imu_processing_task(void *pvParameters)
             }
 
             // In log mỗi khi xử lý xong một batch (0.5s)
-            //ESP_LOGI(TAG, "Batch processed: %d samples. Current Roll: %.2f, Pitch: %.2f", count, last_roll, last_pitch);
+            //ESP_LOGI(TAG, "Batch processed: %d samples. Current Roll: %.2f", count, last_roll);
         }
     }
 }
@@ -253,7 +253,7 @@ esp_err_t imu_service_init(gpio_num_t int_pin)
     kalman_1d_init(&kf_gx, 0.01f, 0.1f, 0);
     kalman_1d_init(&kf_gy, 0.01f, 0.1f, 0);
     kalman_1d_init(&kf_gz, 0.01f, 0.1f, 0);
-    kalman_init(&kal_pitch);
+    kalman_init(&kal_roll);
     memset(&imu_win, 0, sizeof(imu_window_t));
 
     /// HOT START: seed Kalman bằng một mẫu đọc thực ngay lúc khởi tạo, tránh giai đoạn
@@ -263,15 +263,15 @@ esp_err_t imu_service_init(gpio_num_t int_pin)
     float ay_body = -init_data.ay;
     float az_body = init_data.az;
 
-    float init_pitch = atan2(-ax_body, sqrt(ay_body * ay_body + az_body * az_body)) * RAD_TO_DEG;
-    kal_pitch.angle = init_pitch;
-    last_pitch = init_pitch;
+    float init_roll = atan2(ay_body, sqrt(ax_body * ax_body + az_body * az_body)) * RAD_TO_DEG;
+    kal_roll.angle = init_roll;
+    last_roll = init_roll;
 
     // Seed 6-axis Kalman 1D với giá trị đọc ban đầu
     kf_ax.x = ax_body;  kf_ay.x = ay_body;  kf_az.x = az_body;
     kf_gx.x = -init_data.gx;  kf_gy.x = -init_data.gy;  kf_gz.x = init_data.gz;
 
-    ESP_LOGI(TAG, "Hot start completed. Initial Pitch: %.2f", init_pitch);
+    ESP_LOGI(TAG, "Hot start completed. Initial Roll: %.2f", init_roll);
 
     /// Reset FIFO trước khi chạy: sau ~3s calibrate, FIFO đã tràn và byte bị lệch khung.
     mpu6050_reset_fifo();
@@ -330,12 +330,12 @@ esp_err_t imu_service_init(gpio_num_t int_pin)
 }
 
 /**
- * @brief Trả về góc pitch mới nhất (đã lọc Kalman) phục vụ xác định tư thế.
- * @param pitch Con trỏ nhận giá trị pitch (đơn vị độ).
+ * @brief Trả về góc roll mới nhất (đã lọc Kalman) phục vụ xác định tư thế.
+ * @param roll Con trỏ nhận giá trị roll (đơn vị độ).
  */
-void imu_service_get_latest_pitch(float *pitch)
+void imu_service_get_latest_roll(float *roll)
 {
-    *pitch = last_pitch;
+    *roll = last_roll;
 }
 
 /**
