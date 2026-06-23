@@ -44,6 +44,9 @@ static void sys_manager_event_handler(void* arg, esp_event_base_t event_base, in
         } else if (event_id == CLOUD_CMD_STOP_STREAM) {
             ESP_LOGI(TAG, "Stop streaming command received. Transitioning to STATE_NORMAL.");
             sys_manager_set_state(STATE_NORMAL);
+        } else if (event_id == CLOUD_CMD_OTA_UPDATE) {
+            ESP_LOGI(TAG, "OTA update command received. Transitioning to STATE_OTA.");
+            sys_manager_set_state(STATE_OTA);
         }
     }
 }

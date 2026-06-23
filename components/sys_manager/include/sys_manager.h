@@ -40,7 +40,8 @@ typedef enum {
 typedef enum {
     CLOUD_EVT_MQTT_CONNECTED, ///< Phiên MQTT tới broker đã thiết lập
     CLOUD_CMD_START_STREAM,   ///< Lệnh từ backend: bắt đầu streaming raw IMU
-    CLOUD_CMD_STOP_STREAM     ///< Lệnh từ backend: dừng streaming, về chế độ bình thường
+    CLOUD_CMD_STOP_STREAM,    ///< Lệnh từ backend: dừng streaming, về chế độ bình thường
+    CLOUD_CMD_OTA_UPDATE      ///< Lệnh từ backend: flash firmware mới qua OTA
 } cloud_event_id_t;
 
 /// Các event thuộc nhóm IMU (IMU_EVENT) — báo dữ liệu cảm biến đã sẵn sàng.

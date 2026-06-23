@@ -1,4 +1,5 @@
 #include "svc_cloud.h"
+#include "hardware_config.h"
 #include <string.h>
 #include "cJSON.h"
 #include "esp_event.h"
@@ -15,6 +16,7 @@
 #include "svc_ai.h"
 #include "svc_network.h"
 #include "drv_battery.h"
+#include "svc_ota.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "tflite_wrapper.h"
@@ -129,11 +131,19 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base,
                             else if (strcmp(action_item->valuestring,
                                             "ota_update") == 0)
                             {
-                                ESP_LOGI(TAG,
-                                         "Action: ota_update (Not implemented "
-                                         "yet - Phase 5.1)");
-                                // TODO: Thêm logic cập nhật OTA ở Phase 5.1 (vd
-                                // parse URL từ cJSON)
+                                cJSON *url_item = cJSON_GetObjectItem(root, "url");
+                                if (cJSON_IsString(url_item) && url_item->valuestring != NULL)
+                                {
+                                    ESP_LOGI(TAG, "Action: ota_update. URL: %s",
+                                             url_item->valuestring);
+                                    esp_event_post(CLOUD_EVENT, CLOUD_CMD_OTA_UPDATE,
+                                                   NULL, 0, portMAX_DELAY);
+                                    svc_ota_trigger(url_item->valuestring);
+                                }
+                                else
+                                {
+                                    ESP_LOGE(TAG, "ota_update: missing 'url' field");
+                                }
                             }
                             else if (strcmp(action_item->valuestring, "set_interval") == 0)
                             {
@@ -446,6 +456,7 @@ static void net_event_handler(void* arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "Network connected. Starting MQTT Client...");
         esp_mqtt_client_config_t mqtt_cfg = {
             .broker.address.uri = s_mqtt_cfg_data.broker_uri,
+            .broker.verification.certificate = CONFIG_MQTT_CA_CERT,
             .credentials.username = s_mqtt_cfg_data.username,
             .credentials.authentication.password = s_mqtt_cfg_data.password,
             .credentials.client_id = s_mqtt_cfg_data.client_id,
