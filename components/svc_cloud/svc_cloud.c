@@ -31,12 +31,15 @@ static char s_device_id[64] = {0};
 /// Hàng đợi IMU tách biệt: luồng IMU stream (STREAMING) đi qua queue riêng,
 /// không dùng chung với telemetry/alert để tránh chặn lẫn nhau khi tải cao.
 static QueueHandle_t s_imu_queue = NULL;
-static uint32_t s_telemetry_interval_ms = 5000; // Mặc định 5s
+static uint32_t s_telemetry_interval_ms = 5000;  // Mặc định 5s
 static uint64_t s_last_fall_alert_ts = 0;
 /// Cooldown chống spam alert: sau mỗi lần gửi cảnh báo ngã, im lặng cố định
-/// một khoảng thời gian để một cú ngã không bị phát hiện lặp lại tạo ra hàng loạt alert trùng.
+/// một khoảng thời gian để một cú ngã không bị phát hiện lặp lại tạo ra hàng
+/// loạt alert trùng.
 static uint64_t s_fall_cooldown_us = 15000000ULL;  // Mặc định 15 seconds
 static uint32_t s_stream_timeout_min = 5;
+
+static uint64_t s_last_low_battery_alert_ts = 0;
 
 static char s_cached_alert_payload[256] = {0};
 static volatile bool s_has_cached_alert = false;
@@ -53,8 +56,9 @@ typedef struct
 static mqtt_config_t s_mqtt_cfg_data;
 
 /**
- * @brief Xử lý các sự kiện từ MQTT client (kết nối, mất kết nối, nhận data, lỗi).
- *        Khi nhận lệnh trên topic command sẽ parse JSON và phát event điều khiển tương ứng.
+ * @brief Xử lý các sự kiện từ MQTT client (kết nối, mất kết nối, nhận data,
+ * lỗi). Khi nhận lệnh trên topic command sẽ parse JSON và phát event điều khiển
+ * tương ứng.
  * @param handler_args Tham số người dùng truyền khi đăng ký (không dùng).
  * @param base Event base của MQTT.
  * @param event_id Mã sự kiện MQTT.
@@ -71,8 +75,8 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base,
             ESP_LOGI(TAG, "MQTT Connected to broker!");
             s_mqtt_connected = true;
 
-            /// Subscribe topic command với QoS 1 để đảm bảo nhận đủ lệnh điều khiển
-            /// từ backend (start/stop stream, set_interval, OTA).
+            /// Subscribe topic command với QoS 1 để đảm bảo nhận đủ lệnh điều
+            /// khiển từ backend (start/stop stream, set_interval, OTA).
             char cmd_topic[128];
             snprintf(cmd_topic, sizeof(cmd_topic), "eldercare/%s/command",
                      s_device_id);
@@ -87,21 +91,34 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base,
 
             // Gửi config status ngay khi kết nối
             char cfg_status_topic[128];
-            snprintf(cfg_status_topic, sizeof(cfg_status_topic), "eldercare/%s/config/status", s_device_id);
+            snprintf(cfg_status_topic, sizeof(cfg_status_topic),
+                     "eldercare/%s/config/status", s_device_id);
             cJSON* root_cfg = cJSON_CreateObject();
-            if (root_cfg) {
-                cJSON_AddNumberToObject(root_cfg, "interval", s_telemetry_interval_ms / 1000);
-                cJSON_AddNumberToObject(root_cfg, "fall_threshold", tflite_get_fall_threshold());
-                cJSON_AddNumberToObject(root_cfg, "fall_cooldown", s_fall_cooldown_us / 1000000ULL);
-                cJSON_AddNumberToObject(root_cfg, "stream_timeout", s_stream_timeout_min);
-                cJSON_AddNumberToObject(root_cfg, "fall_confirm_window", svc_ai_get_confirm_window_ms() / 1000);
-                cJSON_AddNumberToObject(root_cfg, "rssi_interval", svc_network_get_rssi_interval_ms() / 1000);
-                /// Báo version firmware đang chạy kèm config/status (lúc connect/reconnect) →
-                /// backend tự cập nhật Device.firmware_version (đúng sau mỗi OTA reboot).
-                cJSON_AddStringToObject(root_cfg, "fw_version", esp_app_get_description()->version);
+            if (root_cfg)
+            {
+                cJSON_AddNumberToObject(root_cfg, "interval",
+                                        s_telemetry_interval_ms / 1000);
+                cJSON_AddNumberToObject(root_cfg, "fall_threshold",
+                                        tflite_get_fall_threshold());
+                cJSON_AddNumberToObject(root_cfg, "fall_cooldown",
+                                        s_fall_cooldown_us / 1000000ULL);
+                cJSON_AddNumberToObject(root_cfg, "stream_timeout",
+                                        s_stream_timeout_min);
+                cJSON_AddNumberToObject(root_cfg, "fall_confirm_window",
+                                        svc_ai_get_confirm_window_ms() / 1000);
+                cJSON_AddNumberToObject(
+                    root_cfg, "rssi_interval",
+                    svc_network_get_rssi_interval_ms() / 1000);
+                /// Báo version firmware đang chạy kèm config/status (lúc
+                /// connect/reconnect) → backend tự cập nhật
+                /// Device.firmware_version (đúng sau mỗi OTA reboot).
+                cJSON_AddStringToObject(root_cfg, "fw_version",
+                                        esp_app_get_description()->version);
                 char* json_str = cJSON_PrintUnformatted(root_cfg);
-                if (json_str) {
-                    esp_mqtt_client_publish(s_mqtt_client, cfg_status_topic, json_str, 0, 1, 0);
+                if (json_str)
+                {
+                    esp_mqtt_client_publish(s_mqtt_client, cfg_status_topic,
+                                            json_str, 0, 1, 0);
                     free(json_str);
                 }
                 cJSON_Delete(root_cfg);
@@ -109,21 +126,36 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base,
 
             esp_event_post(CLOUD_EVENT, CLOUD_EVT_MQTT_CONNECTED, NULL, 0,
                            portMAX_DELAY);
-            
-            // 1. Kiểm tra xem NVS có cục Alert bị kẹt từ lần sập nguồn trước không
+
+            // 1. Kiểm tra xem NVS có cục Alert bị kẹt từ lần sập nguồn trước
+            // không
             nvs_handle_t my_handle;
-            if (nvs_open("config", NVS_READWRITE, &my_handle) == ESP_OK) {
+            if (nvs_open("config", NVS_READWRITE, &my_handle) == ESP_OK)
+            {
                 size_t required_size = 0;
-                if (nvs_get_str(my_handle, "unsent_al", NULL, &required_size) == ESP_OK && required_size > 0) {
+                if (nvs_get_str(my_handle, "unsent_al", NULL, &required_size) ==
+                        ESP_OK &&
+                    required_size > 0)
+                {
                     char* old_alert = malloc(required_size);
-                    if (nvs_get_str(my_handle, "unsent_al", old_alert, &required_size) == ESP_OK) {
-                        s_alert_msg_id = esp_mqtt_client_publish(s_mqtt_client, cmd_topic, old_alert, 0, 1, 0); // tạm dùng biến tạm, sẽ ghi đè topic ngay
+                    if (nvs_get_str(my_handle, "unsent_al", old_alert,
+                                    &required_size) == ESP_OK)
+                    {
+                        s_alert_msg_id = esp_mqtt_client_publish(
+                            s_mqtt_client, cmd_topic, old_alert, 0, 1,
+                            0);  // tạm dùng biến tạm, sẽ ghi đè topic ngay
                         char al_topic[128];
-                        snprintf(al_topic, sizeof(al_topic), "eldercare/%s/alert/fall", s_device_id);
-                        s_alert_msg_id = esp_mqtt_client_publish(s_mqtt_client, al_topic, old_alert, 0, 1, 0);
-                        ESP_LOGW(TAG, "PHỤC HỒI ALERT TỪ NVS: Gửi lại cảnh báo ngã cũ (msg_id=%d)", s_alert_msg_id);
+                        snprintf(al_topic, sizeof(al_topic),
+                                 "eldercare/%s/alert/fall", s_device_id);
+                        s_alert_msg_id = esp_mqtt_client_publish(
+                            s_mqtt_client, al_topic, old_alert, 0, 1, 0);
+                        ESP_LOGW(TAG,
+                                 "PHỤC HỒI ALERT TỪ NVS: Gửi lại cảnh báo ngã "
+                                 "cũ (msg_id=%d)",
+                                 s_alert_msg_id);
                         s_has_cached_alert = true;
-                        strncpy(s_cached_alert_payload, old_alert, sizeof(s_cached_alert_payload) - 1);
+                        strncpy(s_cached_alert_payload, old_alert,
+                                sizeof(s_cached_alert_payload) - 1);
                         nvs_erase_key(my_handle, "unsent_al");
                         nvs_commit(my_handle);
                     }
@@ -131,13 +163,18 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base,
                 }
                 nvs_close(my_handle);
             }
-            
-            // 2. Nếu trong phiên này có Alert chưa gửi được vì rớt mạng MQTT ngắn hạn
-            if (s_has_cached_alert) {
+
+            // 2. Nếu trong phiên này có Alert chưa gửi được vì rớt mạng MQTT
+            // ngắn hạn
+            if (s_has_cached_alert)
+            {
                 char al_topic[128];
-                snprintf(al_topic, sizeof(al_topic), "eldercare/%s/alert/fall", s_device_id);
-                s_alert_msg_id = esp_mqtt_client_publish(s_mqtt_client, al_topic, s_cached_alert_payload, 0, 1, 0);
-                ESP_LOGW(TAG, "Đã gửi lại Alert từ RAM Cache (msg_id=%d)", s_alert_msg_id);
+                snprintf(al_topic, sizeof(al_topic), "eldercare/%s/alert/fall",
+                         s_device_id);
+                s_alert_msg_id = esp_mqtt_client_publish(
+                    s_mqtt_client, al_topic, s_cached_alert_payload, 0, 1, 0);
+                ESP_LOGW(TAG, "Đã gửi lại Alert từ RAM Cache (msg_id=%d)",
+                         s_alert_msg_id);
             }
             break;
 
@@ -151,11 +188,12 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base,
             ESP_LOGI(TAG, "MQTT Data received on topic: %.*s", event->topic_len,
                      event->topic);
 
-            // Dựng lại topic command và config kỳ vọng để so khớp với topic nhận được
+            // Dựng lại topic command và config kỳ vọng để so khớp với topic
+            // nhận được
             char cmd_topic_check[128];
             snprintf(cmd_topic_check, sizeof(cmd_topic_check),
                      "eldercare/%s/command", s_device_id);
-                     
+
             char cfg_topic_check[128];
             snprintf(cfg_topic_check, sizeof(cfg_topic_check),
                      "eldercare/%s/config/set", s_device_id);
@@ -199,24 +237,39 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base,
                             else if (strcmp(action_item->valuestring,
                                             "update_firmware") == 0)
                             {
-                                cJSON* url_item = cJSON_GetObjectItem(root, "url");
-                                if (cJSON_IsString(url_item) && (url_item->valuestring != NULL))
+                                cJSON* url_item =
+                                    cJSON_GetObjectItem(root, "url");
+                                if (cJSON_IsString(url_item) &&
+                                    (url_item->valuestring != NULL))
                                 {
-                                    ESP_LOGI(TAG, "Action: update_firmware. URL: %s", url_item->valuestring);
-                                    
-                                    // Gọi thư viện OTA để spawn task download & flash
-                                    #include "svc_ota.h"
-                                    esp_err_t err = svc_ota_trigger(url_item->valuestring);
-                                    if (err != ESP_OK) {
-                                        ESP_LOGE(TAG, "Failed to trigger OTA: %s", esp_err_to_name(err));
-                                    } else {
-                                        ESP_LOGI(TAG, "OTA triggered successfully. System will reboot upon completion.");
+                                    ESP_LOGI(TAG,
+                                             "Action: update_firmware. URL: %s",
+                                             url_item->valuestring);
+
+// Gọi thư viện OTA để spawn task download & flash
+#include "svc_ota.h"
+                                    esp_err_t err =
+                                        svc_ota_trigger(url_item->valuestring);
+                                    if (err != ESP_OK)
+                                    {
+                                        ESP_LOGE(TAG,
+                                                 "Failed to trigger OTA: %s",
+                                                 esp_err_to_name(err));
+                                    }
+                                    else
+                                    {
+                                        ESP_LOGI(TAG,
+                                                 "OTA triggered successfully. "
+                                                 "System will reboot upon "
+                                                 "completion.");
                                         // Gửi trạng thái phản hồi nếu cần thiết
                                     }
                                 }
                                 else
                                 {
-                                    ESP_LOGW(TAG, "Action update_firmware requires a valid 'url' string field.");
+                                    ESP_LOGW(TAG,
+                                             "Action update_firmware requires "
+                                             "a valid 'url' string field.");
                                 }
                             }
                             else
@@ -234,7 +287,8 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base,
                     free(json_str);
                 }
             }
-            else if (strncmp(event->topic, cfg_topic_check, event->topic_len) == 0)
+            else if (strncmp(event->topic, cfg_topic_check, event->topic_len) ==
+                     0)
             {
                 char* json_str = malloc(event->data_len + 1);
                 if (json_str != NULL)
@@ -247,92 +301,138 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base,
                     {
                         bool cfg_changed = false;
                         cJSON* item;
-                        
+
                         item = cJSON_GetObjectItem(root, "interval");
-                        if (cJSON_IsNumber(item)) {
+                        if (cJSON_IsNumber(item))
+                        {
                             uint32_t val = item->valueint;
-                            if (val >= 1 && val <= 3600) {
+                            if (val >= 1 && val <= 3600)
+                            {
                                 s_telemetry_interval_ms = val * 1000;
                                 cfg_changed = true;
                             }
                         }
-                        
+
                         item = cJSON_GetObjectItem(root, "fall_threshold");
-                        if (cJSON_IsNumber(item)) {
+                        if (cJSON_IsNumber(item))
+                        {
                             float val = item->valuedouble;
-                            if (val >= 0.15f && val <= 0.95f) {
+                            if (val >= 0.15f && val <= 0.95f)
+                            {
                                 tflite_set_fall_threshold(val);
                                 cfg_changed = true;
                             }
                         }
-                        
+
                         item = cJSON_GetObjectItem(root, "fall_cooldown");
-                        if (cJSON_IsNumber(item)) {
+                        if (cJSON_IsNumber(item))
+                        {
                             uint32_t val = item->valueint;
-                            if (val >= 5 && val <= 300) {
+                            if (val >= 5 && val <= 300)
+                            {
                                 s_fall_cooldown_us = (uint64_t)val * 1000000ULL;
                                 cfg_changed = true;
                             }
                         }
-                        
+
                         item = cJSON_GetObjectItem(root, "stream_timeout");
-                        if (cJSON_IsNumber(item)) {
+                        if (cJSON_IsNumber(item))
+                        {
                             uint32_t val = item->valueint;
-                            if (val >= 1 && val <= 60) {
+                            if (val >= 1 && val <= 60)
+                            {
                                 s_stream_timeout_min = val;
                                 cfg_changed = true;
                             }
                         }
 
                         item = cJSON_GetObjectItem(root, "fall_confirm_window");
-                        if (cJSON_IsNumber(item)) {
+                        if (cJSON_IsNumber(item))
+                        {
                             uint32_t val = item->valueint;
-                            if (val >= 1 && val <= 15) {
+                            if (val >= 1 && val <= 15)
+                            {
                                 svc_ai_set_confirm_window_ms(val * 1000);
                                 cfg_changed = true;
                             }
                         }
 
                         item = cJSON_GetObjectItem(root, "rssi_interval");
-                        if (cJSON_IsNumber(item)) {
+                        if (cJSON_IsNumber(item))
+                        {
                             uint32_t val = (uint32_t)item->valueint;
-                            /// 0 = tắt hẳn; giá trị hợp lệ khác: 60, 120, 300, 600 (giây).
-                            /// svc_network_set_rssi_interval_ms tự clamp non-zero < 60s lên 60s.
-                            if (val == 0 || (val >= 60 && val <= 600)) {
+                            /// 0 = tắt hẳn; giá trị hợp lệ khác: 60, 120, 300,
+                            /// 600 (giây). svc_network_set_rssi_interval_ms tự
+                            /// clamp non-zero < 60s lên 60s.
+                            if (val == 0 || (val >= 60 && val <= 600))
+                            {
                                 svc_network_set_rssi_interval_ms(val * 1000);
                                 cfg_changed = true;
                             }
                         }
 
-                        if (cfg_changed) {
+                        if (cfg_changed)
+                        {
                             nvs_handle_t my_handle;
-                            if (nvs_open("config", NVS_READWRITE, &my_handle) == ESP_OK) {
-                                nvs_set_u32(my_handle, "tel_int", s_telemetry_interval_ms);
-                                nvs_set_u32(my_handle, "fall_thr", (uint32_t)(tflite_get_fall_threshold() * 100.0f));
-                                nvs_set_u32(my_handle, "fall_cd", (uint32_t)(s_fall_cooldown_us / 1000000ULL));
-                                nvs_set_u32(my_handle, "str_to", s_stream_timeout_min);
-                                nvs_set_u32(my_handle, "fall_cf", svc_ai_get_confirm_window_ms());
-                                nvs_set_u32(my_handle, "rssi_int", svc_network_get_rssi_interval_ms() / 1000);
+                            if (nvs_open("config", NVS_READWRITE, &my_handle) ==
+                                ESP_OK)
+                            {
+                                nvs_set_u32(my_handle, "tel_int",
+                                            s_telemetry_interval_ms);
+                                nvs_set_u32(
+                                    my_handle, "fall_thr",
+                                    (uint32_t)(tflite_get_fall_threshold() *
+                                               100.0f));
+                                nvs_set_u32(my_handle, "fall_cd",
+                                            (uint32_t)(s_fall_cooldown_us /
+                                                       1000000ULL));
+                                nvs_set_u32(my_handle, "str_to",
+                                            s_stream_timeout_min);
+                                nvs_set_u32(my_handle, "fall_cf",
+                                            svc_ai_get_confirm_window_ms());
+                                nvs_set_u32(
+                                    my_handle, "rssi_int",
+                                    svc_network_get_rssi_interval_ms() / 1000);
                                 nvs_commit(my_handle);
                                 nvs_close(my_handle);
                                 ESP_LOGI(TAG, "Saved new config to NVS");
                             }
-                            
+
                             // Phản hồi lại status
                             char cfg_status_topic[128];
-                            snprintf(cfg_status_topic, sizeof(cfg_status_topic), "eldercare/%s/config/status", s_device_id);
+                            snprintf(cfg_status_topic, sizeof(cfg_status_topic),
+                                     "eldercare/%s/config/status", s_device_id);
                             cJSON* root_cfg = cJSON_CreateObject();
-                            if (root_cfg) {
-                                cJSON_AddNumberToObject(root_cfg, "interval", s_telemetry_interval_ms / 1000);
-                                cJSON_AddNumberToObject(root_cfg, "fall_threshold", tflite_get_fall_threshold());
-                                cJSON_AddNumberToObject(root_cfg, "fall_cooldown", s_fall_cooldown_us / 1000000ULL);
-                                cJSON_AddNumberToObject(root_cfg, "stream_timeout", s_stream_timeout_min);
-                                cJSON_AddNumberToObject(root_cfg, "fall_confirm_window", svc_ai_get_confirm_window_ms() / 1000);
-                                cJSON_AddNumberToObject(root_cfg, "rssi_interval", svc_network_get_rssi_interval_ms() / 1000);
-                                cJSON_AddStringToObject(root_cfg, "fw_version", esp_app_get_description()->version);
-                                char* reply_str = cJSON_PrintUnformatted(root_cfg);
-                                if (reply_str) {
-                                    esp_mqtt_client_publish(s_mqtt_client, cfg_status_topic, reply_str, 0, 1, 0);
+                            if (root_cfg)
+                            {
+                                cJSON_AddNumberToObject(
+                                    root_cfg, "interval",
+                                    s_telemetry_interval_ms / 1000);
+                                cJSON_AddNumberToObject(
+                                    root_cfg, "fall_threshold",
+                                    tflite_get_fall_threshold());
+                                cJSON_AddNumberToObject(
+                                    root_cfg, "fall_cooldown",
+                                    s_fall_cooldown_us / 1000000ULL);
+                                cJSON_AddNumberToObject(root_cfg,
+                                                        "stream_timeout",
+                                                        s_stream_timeout_min);
+                                cJSON_AddNumberToObject(
+                                    root_cfg, "fall_confirm_window",
+                                    svc_ai_get_confirm_window_ms() / 1000);
+                                cJSON_AddNumberToObject(
+                                    root_cfg, "rssi_interval",
+                                    svc_network_get_rssi_interval_ms() / 1000);
+                                cJSON_AddStringToObject(
+                                    root_cfg, "fw_version",
+                                    esp_app_get_description()->version);
+                                char* reply_str =
+                                    cJSON_PrintUnformatted(root_cfg);
+                                if (reply_str)
+                                {
+                                    esp_mqtt_client_publish(s_mqtt_client,
+                                                            cfg_status_topic,
+                                                            reply_str, 0, 1, 0);
                                     free(reply_str);
                                 }
                                 cJSON_Delete(root_cfg);
@@ -351,8 +451,11 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base,
         }
         case MQTT_EVENT_PUBLISHED:
             ESP_LOGD(TAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
-            if (event->msg_id == s_alert_msg_id) {
-                ESP_LOGI(TAG, "Cảnh báo ngã đã được Broker xác nhận (QoS 1). Xóa cache.");
+            if (event->msg_id == s_alert_msg_id)
+            {
+                ESP_LOGI(
+                    TAG,
+                    "Cảnh báo ngã đã được Broker xác nhận (QoS 1). Xóa cache.");
                 s_has_cached_alert = false;
             }
             break;
@@ -379,7 +482,7 @@ static void svc_cloud_task(void* pvParameters)
     uint32_t last_sent_walk = 0, last_sent_run = 0;
     // Lấy giá trị ban đầu làm mốc để tính delta
     imu_service_get_steps(&last_sent_walk, &last_sent_run);
-    
+
     int64_t mqtt_down_since_us = 0;
     static uint32_t s_stream_seq = 0;
     static system_state_t last_state = STATE_INIT;
@@ -387,16 +490,19 @@ static void svc_cloud_task(void* pvParameters)
     while (1)
     {
         system_state_t current_state = sys_manager_get_state();
-        if (current_state == STATE_STREAMING && last_state != STATE_STREAMING) {
+        if (current_state == STATE_STREAMING && last_state != STATE_STREAMING)
+        {
             s_stream_seq = 0;
         }
         last_state = current_state;
-        /// Chờ batch IMU tối đa 1s rồi mới rơi xuống nhánh telemetry; timeout này
-        /// đảm bảo telemetry vẫn được kiểm tra định kỳ ngay cả khi không có batch nào.
+        /// Chờ batch IMU tối đa 1s rồi mới rơi xuống nhánh telemetry; timeout
+        /// này đảm bảo telemetry vẫn được kiểm tra định kỳ ngay cả khi không có
+        /// batch nào.
         if (xQueueReceive(s_imu_queue, &batch, pdMS_TO_TICKS(1000)) == pdTRUE)
         {
-            /// Mất kết nối MQTT thì bỏ luôn batch (drop) thay vì tích lũy, tránh tràn
-            /// bộ nhớ và gửi dữ liệu cũ không còn giá trị thời gian thực.
+            /// Mất kết nối MQTT thì bỏ luôn batch (drop) thay vì tích lũy,
+            /// tránh tràn bộ nhớ và gửi dữ liệu cũ không còn giá trị thời gian
+            /// thực.
             if (!s_mqtt_connected || s_mqtt_client == NULL)
             {
                 ESP_LOGW(TAG,
@@ -412,7 +518,8 @@ static void svc_cloud_task(void* pvParameters)
             size_t b64_len = 0;
 
             /// Mã hóa Base64 dữ liệu IMU nhị phân để nhúng an toàn vào JSON
-            /// (JSON không tải được byte thô). Lần gọi đầu chỉ để lấy độ dài b64_len.
+            /// (JSON không tải được byte thô). Lần gọi đầu chỉ để lấy độ dài
+            /// b64_len.
             mbedtls_base64_encode(NULL, 0, &b64_len,
                                   (const unsigned char*)batch.data, raw_len);
 
@@ -441,16 +548,24 @@ static void svc_cloud_task(void* pvParameters)
                         char topic[128];
                         snprintf(topic, sizeof(topic),
                                  "eldercare/%s/imu_stream", s_device_id);
-                        /// IMU stream dùng QoS 0: dữ liệu tần suất cao, mất vài batch
-                        /// không nghiêm trọng, ưu tiên thông lượng hơn độ tin cậy.
+                        /// IMU stream dùng QoS 0: dữ liệu tần suất cao, mất vài
+                        /// batch không nghiêm trọng, ưu tiên thông lượng hơn độ
+                        /// tin cậy.
                         uint64_t t1 = esp_timer_get_time();
                         int msg_id = esp_mqtt_client_publish(
                             s_mqtt_client, topic, json_str, 0, 0, 0);
                         uint64_t t2 = esp_timer_get_time();
 
-                        if (t2 - t1 > 500000ULL) {
-                            ESP_LOGE(TAG, "Publish mất %llu ms! Mạng 4G quá tải không đáp ứng nổi luồng Stream liên tục. Tự động ngắt Stream để bảo toàn tính nhân quả của dữ liệu...", (t2 - t1)/1000);
-                            esp_event_post(SYS_EVENT, CLOUD_CMD_STOP_STREAM, NULL, 0, portMAX_DELAY);
+                        if (t2 - t1 > 500000ULL)
+                        {
+                            ESP_LOGE(TAG,
+                                     "Publish mất %llu ms! Mạng 4G quá tải "
+                                     "không đáp ứng nổi luồng Stream liên tục. "
+                                     "Tự động ngắt Stream để bảo toàn tính "
+                                     "nhân quả của dữ liệu...",
+                                     (t2 - t1) / 1000);
+                            esp_event_post(SYS_EVENT, CLOUD_CMD_STOP_STREAM,
+                                           NULL, 0, portMAX_DELAY);
                         }
 
                         ESP_LOGI(
@@ -466,9 +581,10 @@ static void svc_cloud_task(void* pvParameters)
         }
 
         // --- Task 4.4: Telemetry (Pedometer & Battery) ---
-        // Gửi status theo chu kỳ s_telemetry_interval_ms khi đang ở STATE_NORMAL
-        if (s_mqtt_connected &&
-            (xTaskGetTickCount() - last_telemetry_time >= pdMS_TO_TICKS(s_telemetry_interval_ms)))
+        // Gửi status theo chu kỳ s_telemetry_interval_ms khi đang ở
+        // STATE_NORMAL
+        if (s_mqtt_connected && (xTaskGetTickCount() - last_telemetry_time >=
+                                 pdMS_TO_TICKS(s_telemetry_interval_ms)))
         {
             if (sys_manager_get_state() == STATE_NORMAL)
             {
@@ -477,34 +593,65 @@ static void svc_cloud_task(void* pvParameters)
                 {
                     uint32_t current_walk = 0, current_run = 0;
                     imu_service_get_steps(&current_walk, &current_run);
-                    
+
                     // Tính số bước đi được trong chu kỳ (interval) này
                     uint32_t delta_walk = current_walk - last_sent_walk;
-                    uint32_t delta_run  = current_run  - last_sent_run;
-                    
+                    uint32_t delta_run = current_run - last_sent_run;
+
                     // Cập nhật lại mốc
                     last_sent_walk = current_walk;
-                    last_sent_run  = current_run;
+                    last_sent_run = current_run;
 
                     int batt = drv_battery_read_percent();
-                    cJSON_AddNumberToObject(root, "battery", batt < 0 ? 0 : batt);
-                    /// Gửi lên broker là số delta để backend cộng dồn vào InfluxDB
-                    /// tránh bị cộng dồn trùng lặp số tổng.
+                    cJSON_AddNumberToObject(root, "battery",
+                                            batt < 0 ? 0 : batt);
+
+                    if (batt >= 0 && batt < 20)
+                    {
+                        uint64_t now = esp_timer_get_time();
+                        // Cooldown 30 phút = 1800000000ULL
+                        if (now - s_last_low_battery_alert_ts >=
+                                1800000000ULL ||
+                            s_last_low_battery_alert_ts == 0)
+                        {
+                            char ev_topic[128];
+                            snprintf(ev_topic, sizeof(ev_topic),
+                                     "eldercare/%s/event", s_device_id);
+                            char ev_payload[128];
+                            snprintf(
+                                ev_payload, sizeof(ev_payload),
+                                "{\"event_type\":\"LOW_BATTERY\","
+                                "\"description\":\"Pin thiết bị còn %d%%\"}",
+                                batt);
+                            esp_mqtt_client_publish(s_mqtt_client, ev_topic,
+                                                    ev_payload, 0, 1, 0);
+                            ESP_LOGW(TAG, "Published LOW_BATTERY event");
+                            s_last_low_battery_alert_ts = now;
+                        }
+                    }
+
+                    /// Gửi lên broker là số delta để backend cộng dồn vào
+                    /// InfluxDB tránh bị cộng dồn trùng lặp số tổng.
                     cJSON_AddNumberToObject(root, "walk_steps", delta_walk);
                     cJSON_AddNumberToObject(root, "run_steps", delta_run);
-                    cJSON_AddNumberToObject(root, "steps", delta_walk + delta_run);
+                    cJSON_AddNumberToObject(root, "steps",
+                                            delta_walk + delta_run);
                     cJSON_AddStringToObject(root, "state", "NORMAL");
-                    cJSON_AddStringToObject(root, "ai_pred", svc_ai_get_latest_prediction());
-                    cJSON_AddNumberToObject(root, "ai_conf", svc_ai_get_latest_confidence());
-                    cJSON_AddNumberToObject(root, "rssi", svc_network_get_rssi());
+                    cJSON_AddStringToObject(root, "ai_pred",
+                                            svc_ai_get_latest_prediction());
+                    cJSON_AddNumberToObject(root, "ai_conf",
+                                            svc_ai_get_latest_confidence());
+                    cJSON_AddNumberToObject(root, "rssi",
+                                            svc_network_get_rssi());
                     char* json_str = cJSON_PrintUnformatted(root);
                     if (json_str)
                     {
                         char topic[128];
                         snprintf(topic, sizeof(topic), "eldercare/%s/status",
                                  s_device_id);
-                        /// Telemetry status dùng QoS 0: gửi định kỳ liên tục, mất một
-                        /// gói sẽ được bù ở chu kỳ kế tiếp nên không cần đảm bảo gửi đến.
+                        /// Telemetry status dùng QoS 0: gửi định kỳ liên tục,
+                        /// mất một gói sẽ được bù ở chu kỳ kế tiếp nên không
+                        /// cần đảm bảo gửi đến.
                         esp_mqtt_client_publish(s_mqtt_client, topic, json_str,
                                                 0, 0, 0);
                         ESP_LOGI(TAG, "Published Telemetry (Status): %s",
@@ -517,29 +664,45 @@ static void svc_cloud_task(void* pvParameters)
             last_telemetry_time = xTaskGetTickCount();
         }
 
-        // Watchdog: mạng nói còn kết nối nhưng MQTT chết kéo dài → tự phục hồi (tránh kẹt phải reset tay)
-        if (!s_mqtt_connected && svc_network_is_connected()) {
-            if (mqtt_down_since_us == 0) mqtt_down_since_us = esp_timer_get_time();
-            int64_t down_ms = (esp_timer_get_time() - mqtt_down_since_us) / 1000;
+        // Watchdog: mạng nói còn kết nối nhưng MQTT chết kéo dài → tự phục hồi
+        // (tránh kẹt phải reset tay)
+        if (!s_mqtt_connected && svc_network_is_connected())
+        {
+            if (mqtt_down_since_us == 0)
+                mqtt_down_since_us = esp_timer_get_time();
+            int64_t down_ms =
+                (esp_timer_get_time() - mqtt_down_since_us) / 1000;
 
             // Bậc 1 (~60s): ép socket/TLS mới sạch
-            if (down_ms > 60000 && down_ms <= 150000) {
+            if (down_ms > 60000 && down_ms <= 150000)
+            {
                 static int64_t last_kick_us = 0;
-                if (esp_timer_get_time() - last_kick_us > 30000000LL) { // tối đa 30s/lần
-                    ESP_LOGW(TAG, "Watchdog: MQTT kẹt %lld ms → stop/start client", down_ms);
+                if (esp_timer_get_time() - last_kick_us > 30000000LL)
+                {  // tối đa 30s/lần
+                    ESP_LOGW(TAG,
+                             "Watchdog: MQTT kẹt %lld ms → stop/start client",
+                             down_ms);
                     esp_mqtt_client_stop(s_mqtt_client);
                     esp_mqtt_client_start(s_mqtt_client);
                     last_kick_us = esp_timer_get_time();
                 }
             }
             // Bậc 2 (~150s): A7680C/PPP wedge ở tầng dưới → chỉ reboot mới dọn
-            else if (down_ms > 150000) {
-                ESP_LOGE(TAG, "Watchdog: MQTT kẹt %lld ms → flush cache + SYS_EVT_HARDWARE_ERROR", down_ms);
+            else if (down_ms > 150000)
+            {
+                ESP_LOGE(TAG,
+                         "Watchdog: MQTT kẹt %lld ms → flush cache + "
+                         "SYS_EVT_HARDWARE_ERROR",
+                         down_ms);
                 svc_cloud_flush_cache_to_nvs();
-                esp_event_post(SYS_EVENT, SYS_EVT_HARDWARE_ERROR, NULL, 0, portMAX_DELAY);
+                esp_event_post(SYS_EVENT, SYS_EVT_HARDWARE_ERROR, NULL, 0,
+                               portMAX_DELAY);
             }
-        } else {
-            mqtt_down_since_us = 0; // reset khi MQTT up (ca mất mạng thật đã có đường NET_EVT_DISCONNECTED xử lý)
+        }
+        else
+        {
+            mqtt_down_since_us = 0;  // reset khi MQTT up (ca mất mạng thật đã
+                                     // có đường NET_EVT_DISCONNECTED xử lý)
         }
     }
 }
@@ -568,24 +731,36 @@ static void ai_event_handler(void* arg, esp_event_base_t event_base,
             {
                 cJSON_AddStringToObject(root, "user_name", "");
                 cJSON_AddStringToObject(root, "message", "Fall detected");
-                cJSON_AddNumberToObject(root, "confidence", svc_ai_get_latest_confidence());
+                cJSON_AddNumberToObject(root, "confidence",
+                                        svc_ai_get_latest_confidence());
                 char* json_str = cJSON_PrintUnformatted(root);
                 if (json_str)
                 {
                     // LƯU CACHE RAM NGAY LẬP TỨC ĐỂ TRÁNH MẤT NẾU ĐANG CHỜ MẠNG
-                    strncpy(s_cached_alert_payload, json_str, sizeof(s_cached_alert_payload) - 1);
+                    strncpy(s_cached_alert_payload, json_str,
+                            sizeof(s_cached_alert_payload) - 1);
                     s_has_cached_alert = true;
                     s_alert_msg_id = -1;
-                    
-                    if (s_mqtt_connected) {
+
+                    if (s_mqtt_connected)
+                    {
                         char topic[128];
-                        snprintf(topic, sizeof(topic), "eldercare/%s/alert/fall", s_device_id);
-                        s_alert_msg_id = esp_mqtt_client_publish(s_mqtt_client, topic, json_str, 0, 1, 0);
-                        ESP_LOGI(TAG, "Đã gửi MQTT Alert (msg_id=%d)", s_alert_msg_id);
-                        /// Giữ link MQTT suốt cooldown để alert QoS1 chắc chắn đi và tránh trễ alert lặp.
-                        sys_manager_bump_comms_critical((uint32_t)(s_fall_cooldown_us / 1000ULL));
-                    } else {
-                        ESP_LOGW(TAG, "Mất mạng, Alert tạm lưu vào RAM Cache: %s", json_str);
+                        snprintf(topic, sizeof(topic),
+                                 "eldercare/%s/alert/fall", s_device_id);
+                        s_alert_msg_id = esp_mqtt_client_publish(
+                            s_mqtt_client, topic, json_str, 0, 1, 0);
+                        ESP_LOGI(TAG, "Đã gửi MQTT Alert (msg_id=%d)",
+                                 s_alert_msg_id);
+                        /// Giữ link MQTT suốt cooldown để alert QoS1 chắc chắn
+                        /// đi và tránh trễ alert lặp.
+                        sys_manager_bump_comms_critical(
+                            (uint32_t)(s_fall_cooldown_us / 1000ULL));
+                    }
+                    else
+                    {
+                        ESP_LOGW(TAG,
+                                 "Mất mạng, Alert tạm lưu vào RAM Cache: %s",
+                                 json_str);
                     }
                     free(json_str);
                 }
@@ -623,11 +798,13 @@ static void net_event_handler(void* arg, esp_event_base_t event_base,
             .credentials.client_id = s_mqtt_cfg_data.client_id,
             .buffer.size = 2048,
             .buffer.out_size = 2048,
-            .session.keepalive            = 45,     // mặc định 120 → phát hiện socket chết nhanh hơn
-            .network.timeout_ms           = 15000,  // dư địa handshake TLS trên link 4G chậm
+            .session.keepalive =
+                45,  // mặc định 120 → phát hiện socket chết nhanh hơn
+            .network.timeout_ms =
+                15000,  // dư địa handshake TLS trên link 4G chậm
             .network.reconnect_timeout_ms = 8000,
-            .task.priority                = 6,
-            .task.stack_size              = 6144,
+            .task.priority = 6,
+            .task.stack_size = 6144,
         };
 
         // Chỉ khởi tạo client một lần; lần mất/khôi phục mạng sau chỉ start lại
@@ -657,10 +834,36 @@ static void net_event_handler(void* arg, esp_event_base_t event_base,
 }
 
 /**
- * @brief Đẩy một batch dữ liệu IMU vào hàng đợi để task cloud gửi đi (chế độ STREAMING).
+ * @brief Xử lý lỗi phần cứng từ system manager: báo cáo về cloud trước khi
+ * restart
+ */
+static void sys_event_handler(void* arg, esp_event_base_t event_base,
+                              int32_t event_id, void* event_data)
+{
+    if (event_base == SYS_EVENT && event_id == SYS_EVT_HARDWARE_ERROR)
+    {
+        if (s_mqtt_connected)
+        {
+            char ev_topic[128];
+            snprintf(ev_topic, sizeof(ev_topic), "eldercare/%s/event",
+                     s_device_id);
+            char ev_payload[128];
+            snprintf(ev_payload, sizeof(ev_payload),
+                     "{\"event_type\":\"HARDWARE_ERROR\",\"description\":\"Lỗi "
+                     "phần cứng nghiêm trọng\"}");
+            esp_mqtt_client_publish(s_mqtt_client, ev_topic, ev_payload, 0, 1,
+                                    0);
+            ESP_LOGW(TAG, "Published HARDWARE_ERROR event");
+        }
+    }
+}
+
+/**
+ * @brief Đẩy một batch dữ liệu IMU vào hàng đợi để task cloud gửi đi (chế độ
+ * STREAMING).
  * @param batch_data Con trỏ tới batch dữ liệu IMU cần gửi.
- * @return ESP_OK nếu enqueue thành công; ESP_ERR_INVALID_STATE nếu hàng đợi chưa tạo;
- *         ESP_ERR_NO_MEM nếu hàng đợi đầy.
+ * @return ESP_OK nếu enqueue thành công; ESP_ERR_INVALID_STATE nếu hàng đợi
+ * chưa tạo; ESP_ERR_NO_MEM nếu hàng đợi đầy.
  */
 esp_err_t svc_cloud_enqueue_imu_batch(const void* batch_data)
 {
@@ -677,13 +880,15 @@ esp_err_t svc_cloud_enqueue_imu_batch(const void* batch_data)
 }
 
 /**
- * @brief Khởi tạo dịch vụ Cloud: lưu cấu hình MQTT, nạp interval telemetry từ NVS,
- *        tạo hàng đợi IMU, đăng ký các event handler mạng/AI và tạo task xử lý.
+ * @brief Khởi tạo dịch vụ Cloud: lưu cấu hình MQTT, nạp interval telemetry từ
+ * NVS, tạo hàng đợi IMU, đăng ký các event handler mạng/AI và tạo task xử lý.
  * @param broker_uri URI của MQTT broker.
- * @param client_id Định danh client MQTT, đồng thời dùng làm device_id trong topic.
+ * @param client_id Định danh client MQTT, đồng thời dùng làm device_id trong
+ * topic.
  * @param username Tên đăng nhập MQTT.
  * @param password Mật khẩu MQTT.
- * @return ESP_OK nếu khởi tạo thành công; ESP_ERR_NO_MEM nếu tạo hàng đợi thất bại.
+ * @return ESP_OK nếu khởi tạo thành công; ESP_ERR_NO_MEM nếu tạo hàng đợi thất
+ * bại.
  */
 esp_err_t svc_cloud_init(const char* broker_uri, const char* client_id,
                          const char* username, const char* password)
@@ -700,61 +905,79 @@ esp_err_t svc_cloud_init(const char* broker_uri, const char* client_id,
             sizeof(s_mqtt_cfg_data.password) - 1);
     strncpy(s_device_id, client_id, sizeof(s_device_id) - 1);
 
-    /// Nạp lại interval telemetry đã lưu trong NVS (nếu có) để giữ cấu hình người
-    /// dùng từng đặt qua lệnh set_interval; nếu chưa có thì dùng mặc định 5s.
+    /// Nạp lại interval telemetry đã lưu trong NVS (nếu có) để giữ cấu hình
+    /// người dùng từng đặt qua lệnh set_interval; nếu chưa có thì dùng mặc định
+    /// 5s.
     nvs_handle_t my_handle;
     esp_err_t err = nvs_open("config", NVS_READONLY, &my_handle);
-    if (err == ESP_OK) {
+    if (err == ESP_OK)
+    {
         nvs_get_u32(my_handle, "tel_int", &s_telemetry_interval_ms);
 
-        /// (Tùy chọn — multi-org) Override broker/creds từ NVS nếu được pre-provision.
-        /// Không có key → giữ default #define CONFIG_MQTT_BROKER_URI (= broker org).
+        /// (Tùy chọn — multi-org) Override broker/creds từ NVS nếu được
+        /// pre-provision. Không có key → giữ default #define
+        /// CONFIG_MQTT_BROKER_URI (= broker org).
         size_t len = sizeof(s_mqtt_cfg_data.broker_uri);
-        if (nvs_get_str(my_handle, "mqtt_uri", s_mqtt_cfg_data.broker_uri, &len) == ESP_OK)
-            ESP_LOGI(TAG, "Loaded broker URI from NVS: %s", s_mqtt_cfg_data.broker_uri);
+        if (nvs_get_str(my_handle, "mqtt_uri", s_mqtt_cfg_data.broker_uri,
+                        &len) == ESP_OK)
+            ESP_LOGI(TAG, "Loaded broker URI from NVS: %s",
+                     s_mqtt_cfg_data.broker_uri);
         len = sizeof(s_mqtt_cfg_data.username);
         nvs_get_str(my_handle, "mqtt_user", s_mqtt_cfg_data.username, &len);
         len = sizeof(s_mqtt_cfg_data.password);
         nvs_get_str(my_handle, "mqtt_pass", s_mqtt_cfg_data.password, &len);
 
-        uint32_t fall_thr_pct = 25; // Mặc định 0.25
-        if (nvs_get_u32(my_handle, "fall_thr", &fall_thr_pct) == ESP_OK) {
+        uint32_t fall_thr_pct = 25;  // Mặc định 0.25
+        if (nvs_get_u32(my_handle, "fall_thr", &fall_thr_pct) == ESP_OK)
+        {
             tflite_set_fall_threshold((float)fall_thr_pct / 100.0f);
-            ESP_LOGI(TAG, "Loaded fall threshold from NVS: %.2f", (float)fall_thr_pct / 100.0f);
+            ESP_LOGI(TAG, "Loaded fall threshold from NVS: %.2f",
+                     (float)fall_thr_pct / 100.0f);
         }
-        
-        uint32_t fall_cooldown_sec = 15; // Mặc định 15s
-        if (nvs_get_u32(my_handle, "fall_cd", &fall_cooldown_sec) == ESP_OK) {
+
+        uint32_t fall_cooldown_sec = 15;  // Mặc định 15s
+        if (nvs_get_u32(my_handle, "fall_cd", &fall_cooldown_sec) == ESP_OK)
+        {
             s_fall_cooldown_us = (uint64_t)fall_cooldown_sec * 1000000ULL;
-            ESP_LOGI(TAG, "Loaded fall cooldown from NVS: %lu s", fall_cooldown_sec);
+            ESP_LOGI(TAG, "Loaded fall cooldown from NVS: %lu s",
+                     fall_cooldown_sec);
         }
-        
+
         uint32_t stream_to = 5;
-        if (nvs_get_u32(my_handle, "str_to", &stream_to) == ESP_OK) {
+        if (nvs_get_u32(my_handle, "str_to", &stream_to) == ESP_OK)
+        {
             s_stream_timeout_min = stream_to;
             ESP_LOGI(TAG, "Loaded stream timeout from NVS: %lu min", stream_to);
         }
 
         uint32_t fall_cf_ms = 4000;
-        if (nvs_get_u32(my_handle, "fall_cf", &fall_cf_ms) == ESP_OK) {
+        if (nvs_get_u32(my_handle, "fall_cf", &fall_cf_ms) == ESP_OK)
+        {
             svc_ai_set_confirm_window_ms(fall_cf_ms);
-            ESP_LOGI(TAG, "Loaded fall confirm window from NVS: %lu ms", fall_cf_ms);
+            ESP_LOGI(TAG, "Loaded fall confirm window from NVS: %lu ms",
+                     fall_cf_ms);
         }
 
         uint32_t rssi_int_sec = 300;
-        if (nvs_get_u32(my_handle, "rssi_int", &rssi_int_sec) == ESP_OK) {
+        if (nvs_get_u32(my_handle, "rssi_int", &rssi_int_sec) == ESP_OK)
+        {
             svc_network_set_rssi_interval_ms(rssi_int_sec * 1000);
             ESP_LOGI(TAG, "Loaded RSSI interval from NVS: %lu s", rssi_int_sec);
         }
 
         nvs_close(my_handle);
-        ESP_LOGI(TAG, "Loaded telemetry interval from NVS: %lu ms", s_telemetry_interval_ms);
-    } else {
-        ESP_LOGI(TAG, "No saved telemetry interval, using default: %lu ms", s_telemetry_interval_ms);
+        ESP_LOGI(TAG, "Loaded telemetry interval from NVS: %lu ms",
+                 s_telemetry_interval_ms);
+    }
+    else
+    {
+        ESP_LOGI(TAG, "No saved telemetry interval, using default: %lu ms",
+                 s_telemetry_interval_ms);
     }
 
-    /// Hàng đợi IMU sâu 5 phần tử: đủ đệm vài batch khi mạng tắc nghẽn tạm thời,
-    /// vượt quá sẽ drop ở enqueue thay vì làm nghẽn task sản xuất dữ liệu.
+    /// Hàng đợi IMU sâu 5 phần tử: đủ đệm vài batch khi mạng tắc nghẽn tạm
+    /// thời, vượt quá sẽ drop ở enqueue thay vì làm nghẽn task sản xuất dữ
+    /// liệu.
     s_imu_queue = xQueueCreate(5, sizeof(imu_batch_data_t));
     if (s_imu_queue == NULL)
     {
@@ -766,6 +989,8 @@ esp_err_t svc_cloud_init(const char* broker_uri, const char* client_id,
                                NULL);
     esp_event_handler_register(AI_EVENT, AI_EVT_FALL_DETECTED,
                                &ai_event_handler, NULL);
+    esp_event_handler_register(SYS_EVENT, SYS_EVT_HARDWARE_ERROR,
+                               &sys_event_handler, NULL);
 
     xTaskCreate(svc_cloud_task, "svc_cloud_task", 4096, NULL, 5,
                 &s_cloud_task_handle);
@@ -801,13 +1026,17 @@ int svc_cloud_publish(const char* topic, const char* data, int qos, int retain)
 
 void svc_cloud_flush_cache_to_nvs(void)
 {
-    if (s_has_cached_alert) {
+    if (s_has_cached_alert)
+    {
         nvs_handle_t my_handle;
-        if (nvs_open("config", NVS_READWRITE, &my_handle) == ESP_OK) {
+        if (nvs_open("config", NVS_READWRITE, &my_handle) == ESP_OK)
+        {
             nvs_set_str(my_handle, "unsent_al", s_cached_alert_payload);
             nvs_commit(my_handle);
             nvs_close(my_handle);
-            ESP_LOGE(TAG, "CRITICAL: Đã khoá chặt Alert vào NVS trước khi Restart mạch!");
+            ESP_LOGE(
+                TAG,
+                "CRITICAL: Đã khoá chặt Alert vào NVS trước khi Restart mạch!");
         }
     }
 }
