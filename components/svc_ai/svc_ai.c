@@ -7,7 +7,22 @@
 #include "sys_manager.h"
 #include "tflite_wrapper.h"
 #include <string.h>
+#include "nvs.h"
+#include "esp_timer.h"
+
 static const char* TAG = "SVC_AI";
+
+typedef enum {
+    FALL_FSM_NORMAL,
+    FALL_FSM_CONFIRMING
+} fall_fsm_state_t;
+
+static fall_fsm_state_t s_fall_state = FALL_FSM_NORMAL;
+static int64_t s_confirm_start_us = 0;
+static float s_trigger_conf = 0.0f;
+static uint32_t s_hits = 0;
+static uint32_t s_total = 0;
+static uint32_t s_confirm_window_ms = 4000; // Mặc định 4s
 
 /// Message qua Queue chỉ chứa con trỏ tới window (nhằm tránh copy dữ liệu lớn
 /// nhiều lần trong lúc luân chuyển)
@@ -127,30 +142,113 @@ static void svc_ai_task(void* pvParameters)
                     result.inference_time_us / 1000.0, pred_name,
                     result.max_prob * 100.0, result.fall_prob * 100.0);
 
-                /// Nếu trạng thái là IDLE, dùng góc Roll từ Kalman filter để
-                /// xác định tư thế (Posture)
+                float current_roll = 0.0f;
+                imu_service_get_latest_roll(&current_roll);
+                
+                // Trục tọa độ: 0 là nằm ngang (nằm sấp/ngửa), 90 hoặc -90 là đứng thẳng.
+                // Ngưỡng 45 độ dùng để chia cắt: <45 là nằm, >45 là đứng/ngồi.
+                bool is_flat = (current_roll > -45.0f && current_roll < 45.0f);
+                bool is_stand_sit = !is_flat;
+
+                // Bộ đếm theo dõi xem thiết bị có từng ở trạng thái Đứng/Ngồi trong 3s qua không.
+                static int s_not_flat_ticks = 0;
+                if (!is_flat) {
+                    s_not_flat_ticks = 6; // 6 * 0.5s = 3 seconds
+                } else if (s_not_flat_ticks > 0) {
+                    s_not_flat_ticks--;
+                }
+
                 if (result.predicted_class == AI_CLASS_IDLE)
                 {
-                    float current_roll = 0.0f;
-                    imu_service_get_latest_roll(&current_roll);
-
-                    /// Logic cơ bản: Roll nằm trong khoảng [60, 90] hoặc [-90, -60] độ ->
-                    /// Đứng/Ngồi, ngoài ra là Nằm
-                    bool is_stand_sit =
-                        ((current_roll >= 60.0f && current_roll <= 90.0f) || 
-                         (current_roll >= -90.0f && current_roll <= -60.0f));
                     ESP_LOGI(TAG, "Posture: %s (Roll: %.1f deg)",
                              is_stand_sit ? "Stand/Sit" : "Lying Down",
                              current_roll);
                 }
 
-                if (result.predicted_class == AI_CLASS_FALL)
+                // Fall Confirmation FSM
+                if (s_fall_state == FALL_FSM_NORMAL)
                 {
-                    ESP_LOGW(TAG, ">>> WARNING: FALL DETECTED! <<<");
-                    /// Post sự kiện AI_EVT_FALL_DETECTED lên Event Loop để
-                    /// svc_cloud publish MQTT (không gọi trực tiếp giữa các svc_)
-                    esp_event_post(AI_EVENT, AI_EVT_FALL_DETECTED, NULL, 0,
-                                   portMAX_DELAY);
+                    if (result.predicted_class == AI_CLASS_FALL)
+                    {
+                        // Lọc nhiễu Edge Case (Báo động giả khi vứt máy trên bàn):
+                        // Nếu thiết bị đã nằm bẹp hoàn toàn trong suốt >3 giây qua,
+                        // thì 100% không thể là một cú ngã thật sự (vì ngã phải bắt đầu
+                        // từ tư thế đứng/ngồi hoặc ít nhất là lộn vòng).
+                        if (s_not_flat_ticks == 0) {
+                            ESP_LOGW(TAG, ">>> ML Trigger REJECTED: Device was completely flat for >3s (Off-body/On-desk). False alarm blocked.");
+                        } else {
+                        s_fall_state = FALL_FSM_CONFIRMING;
+                        s_confirm_start_us = esp_timer_get_time();
+                        s_trigger_conf = result.max_prob;
+                        s_hits = 0;
+                        s_total = 0;
+
+                        /// Giữ link MQTT suốt cửa sổ xác nhận + 5s biên để alert kịp publish.
+                        sys_manager_bump_comms_critical(s_confirm_window_ms + 5000);
+
+                        ESP_LOGW(TAG, ">>> ML Trigger: Fall class detected. Confidence: %.2f. Starting confirmation FSM (Window: %lu ms)...",
+                                 s_trigger_conf, (unsigned long)s_confirm_window_ms);
+
+                        // Lấy thông tin cú va chạm (impact) gần nhất để log / boost
+                        imu_impact_info_t impact;
+                        imu_service_get_last_impact(&impact);
+                        int64_t now_us = esp_timer_get_time();
+                        if (now_us - impact.ts_us < 1500000)
+                        {
+                            ESP_LOGI(TAG, "[CONFIRMATION BOOST] Recent impact found: peak_g=%.2fg, had_freefall=%d, age=%lld ms",
+                                     impact.peak_g, impact.had_freefall, (now_us - impact.ts_us) / 1000);
+                        }
+                        else
+                        {
+                            ESP_LOGW(TAG, "[CONFIRMATION BOOST] No recent impact found within 1.5s (last was %lld ms ago)", (now_us - impact.ts_us) / 1000);
+                        }
+                        }
+                    }
+                }
+                else if (s_fall_state == FALL_FSM_CONFIRMING)
+                {
+                    bool is_lying = !is_stand_sit;
+                    bool is_ok = (result.predicted_class == AI_CLASS_IDLE) && is_lying;
+
+                    // ABORT nếu class thuộc {WALK, RUN} và roll upright (không nằm)
+                    if ((result.predicted_class == AI_CLASS_WALK || result.predicted_class == AI_CLASS_RUN) && is_stand_sit)
+                    {
+                        ESP_LOGW(TAG, ">>> Confirmation ABORTED: locomotion class %s detected with upright posture.", pred_name);
+                        s_fall_state = FALL_FSM_NORMAL;
+                    }
+                    else
+                    {
+                        if (result.predicted_class != AI_CLASS_TRANSITION)
+                        {
+                            s_total++;
+                            if (is_ok)
+                            {
+                                s_hits++;
+                            }
+                        }
+
+                        int64_t elapsed_ms = (esp_timer_get_time() - s_confirm_start_us) / 1000;
+                        ESP_LOGI(TAG, "Confirming: elapsed=%lld ms, hits/total=%lu/%lu, class=%s, roll=%.1f",
+                                 elapsed_ms, (unsigned long)s_hits, (unsigned long)s_total, pred_name, current_roll);
+
+                        if (elapsed_ms >= s_confirm_window_ms)
+                        {
+                            float ratio = s_total > 0 ? (float)s_hits / s_total : 0.0f;
+                            if (ratio >= 0.6f)
+                            {
+                                ESP_LOGW(TAG, ">>> WARNING: FALL CONFIRMED! Ratio: %.2f (hits/total: %lu/%lu). Posting event...",
+                                         ratio, (unsigned long)s_hits, (unsigned long)s_total);
+                                s_latest_pred_conf = s_trigger_conf;
+                                esp_event_post(AI_EVENT, AI_EVT_FALL_DETECTED, NULL, 0, portMAX_DELAY);
+                            }
+                            else
+                            {
+                                ESP_LOGI(TAG, ">>> Confirmation ABORTED: ratio %.2f < 0.60 (hits/total: %lu/%lu)",
+                                         ratio, (unsigned long)s_hits, (unsigned long)s_total);
+                            }
+                            s_fall_state = FALL_FSM_NORMAL;
+                        }
+                    }
                 }
                 ESP_LOGI(TAG, "---------------------------");
             }
@@ -174,6 +272,15 @@ esp_err_t svc_ai_init(void)
         ESP_LOGE(TAG, "Failed to create AI queue");
         return ESP_FAIL;
     }
+
+    nvs_handle_t my_handle;
+    uint32_t val = 4000;
+    if (nvs_open("config", NVS_READONLY, &my_handle) == ESP_OK) {
+        nvs_get_u32(my_handle, "fall_cf", &val);
+        nvs_close(my_handle);
+    }
+    s_confirm_window_ms = val;
+    ESP_LOGI(TAG, "Loaded fall confirm window from NVS: %lu ms", (unsigned long)s_confirm_window_ms);
 
     BaseType_t ret =
         xTaskCreate(svc_ai_task, "svc_ai_task", 6144, NULL, 6, NULL);
@@ -205,4 +312,15 @@ void svc_ai_process_window(const imu_window_t* window)
     /// Đẩy pointer vào queue để AI Task lấy ra xử lý.
     /// Timeout 0 để không block luồng gọi (ở đây là luồng của svc_imu)
     xQueueSend(s_ai_queue, &msg, 0);
+}
+
+void svc_ai_set_confirm_window_ms(uint32_t ms)
+{
+    s_confirm_window_ms = ms;
+    ESP_LOGI(TAG, "Set fall confirm window to: %lu ms", (unsigned long)s_confirm_window_ms);
+}
+
+uint32_t svc_ai_get_confirm_window_ms(void)
+{
+    return s_confirm_window_ms;
 }

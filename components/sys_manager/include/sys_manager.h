@@ -2,6 +2,8 @@
 #define SYS_MANAGER_H
 
 #include "esp_event.h"
+#include <stdbool.h>
+#include <stdint.h>
 
 /// Tập trạng thái của máy trạng thái hữu hạn (FSM) điều phối toàn hệ thống.
 /// Mỗi trạng thái xác định hành vi vận hành hiện tại của thiết bị.
@@ -26,7 +28,8 @@ ESP_EVENT_DECLARE_BASE(AI_EVENT);
 typedef enum {
     SYS_EVT_READY,             ///< Toàn bộ service đã sẵn sàng
     SYS_EVT_ENTER_STREAM_MODE, ///< Yêu cầu chuyển sang chế độ streaming
-    SYS_EVT_ENTER_NORMAL_MODE  ///< Yêu cầu quay về chế độ vận hành bình thường
+    SYS_EVT_ENTER_NORMAL_MODE, ///< Yêu cầu quay về chế độ vận hành bình thường
+    SYS_EVT_HARDWARE_ERROR     ///< Lỗi phần cứng nghiêm trọng, yêu cầu vào STATE_ERROR
 } sys_event_id_t;
 
 /// Các event thuộc nhóm mạng (NET_EVENT) — kích hoạt chuyển trạng thái kết nối.
@@ -74,5 +77,18 @@ system_state_t sys_manager_get_state(void);
  * @param new_state Trạng thái đích cần chuyển tới.
  */
 void sys_manager_set_state(system_state_t new_state);
+
+/**
+ * @brief Gia hạn cửa sổ comms-critical thêm `ms` milli-giây kể từ bây giờ.
+ *        Dùng MAX(thời điểm hiện tại, deadline cũ) để hai writer không giẫm nhau.
+ * @param ms Độ dài cửa sổ cần giữ (milli-giây). Cộng dồn nếu chưa hết hạn.
+ */
+void sys_manager_bump_comms_critical(uint32_t ms);
+
+/**
+ * @brief Kiểm tra xem thiết bị có đang trong cửa sổ comms-critical không.
+ * @return true nếu đang trong cửa sổ (không được ngắt PPP), false nếu ngoài cửa sổ.
+ */
+bool sys_manager_is_comms_critical(void);
 
 #endif // SYS_MANAGER_H

@@ -30,8 +30,6 @@ extern "C"
      *
      * @param window Con trỏ tới struct imu_window_t chứa RingBuffer dữ liệu IMU
      */
-    /// Dùng queue bất đồng bộ để tách luồng IMU khỏi inference: chỉ đẩy con trỏ
-    /// window vào queue rồi trả về ngay, không chặn task IMU trong lúc AI chạy.
     void svc_ai_process_window(const imu_window_t* window);
 
     /**
@@ -45,6 +43,18 @@ extern "C"
      * @return float (từ 0.0 đến 1.0)
      */
     float svc_ai_get_latest_confidence(void);
+
+    /**
+     * @brief Cấu hình cửa sổ xác nhận ngã (confirmation window) sau khi ML phát hiện.
+     * @param ms Thời gian xác nhận (ms)
+     */
+    void svc_ai_set_confirm_window_ms(uint32_t ms);
+
+    /**
+     * @brief Lấy cửa sổ xác nhận ngã (confirmation window) hiện tại (ms).
+     * @return Thời gian xác nhận (ms)
+     */
+    uint32_t svc_ai_get_confirm_window_ms(void);
 
 #ifdef __cplusplus
 }

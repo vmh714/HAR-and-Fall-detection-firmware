@@ -60,13 +60,15 @@ components/
 
 ## FSM — Các trạng thái chính
 
-| State | Mô tả |
-|---|---|
-| `STATE_INIT` | Khởi tạo phần cứng, driver, services |
-| `STATE_CONNECTING` | Chờ mạng + MQTT sẵn sàng, tự retry |
-| `STATE_NORMAL` | **Production**: AI inference liên tục, gửi telemetry 1 phút/lần, alert ngay khi ngã |
-| `STATE_STREAMING` | **Data collection**: bỏ qua AI, batch raw IMU → MQTT để thu thập dataset train |
-| `STATE_OTA` | Nhận firmware mới → restart |
+| State | Mô tả | Drain FIFO | Kalman/Normalize | AI / Pedometer | Publish Status | Publish Stream |
+|---|---|:---:|:---:|:---:|:---:|:---:|
+| `STATE_INIT` | Khởi tạo phần cứng | ✓ | – | – | – | – |
+| `STATE_CONNECTING` | Chờ mạng, tự retry | ✓ | – | – | – | – |
+| `STATE_NORMAL` | **Production**: AI inference liên tục | ✓ | ✓ | ✓ | ✓ | – |
+| `STATE_STREAMING` | **Data collection**: raw IMU batch | ✓ | ✓ | – | – | ✓ |
+| `STATE_OTA` | Nhận firmware → restart | ✓ | – | – | – | – |
+
+*Luôn drain FIFO ở mọi state để chống tràn, nhưng chỉ thực hiện tính toán (Kalman, AI) ở NORMAL hoặc STREAMING.*
 
 ## Luồng dữ liệu chính (STATE_NORMAL)
 
@@ -81,6 +83,8 @@ MPU6050 (100Hz ngắt)
                                                              └── MQTT publish alert (QoS 1)
 ```
 
+*(Lưu ý: Ở `STATE_STREAMING`, luồng AI bị chặn lại để nhường toàn bộ CPU cho việc đóng gói và gửi IMU batch qua `svc_cloud`)*
+
 ## MQTT Topics
 
 | Topic | Hướng | Mô tả |
@@ -94,6 +98,7 @@ MPU6050 (100Hz ngắt)
 - **Không gọi trực tiếp giữa các svc_**: mọi giao tiếp phải qua `esp_event_post()` → `sys_manager` xử lý
 - **Sliding Window**: 200 mẫu (2s ở 100Hz), trượt 50 mẫu (0.5s) — không thay đổi mà không retrain model
 - **Cooldown chống spam**: `svc_cloud` im lặng 15 giây cố định (`FALL_COOLDOWN_US`) sau mỗi lần gửi alert; `svc_ai` không có cooldown, phát event mỗi lần phát hiện ngã
+- **Watchdog MQTT**: `svc_cloud` có watchdog tự phục hồi 2 bậc (stop/start client sau 60s, restart mạch sau 150s kẹt liên tục).
 - **`lib_model/model_data.cc`**: file này được sinh tự động từ TFLite — KHÔNG sửa tay
 
 ## Quy ước comment (code style)

@@ -1,27 +1,22 @@
 # Wearable HAR & Post-Impact Fall Detection Firmware
 
 ## Tổng Quan Hệ Thống (System Overview)
-Hệ thống giám sát vận động (HAR) và phát hiện té ngã trên thiết bị đeo, sử dụng vi điều khiển **Seeed Studio XIAO ESP32S3** (8MB PSRAM/Flash). Hệ thống tích hợp cảm biến gia tốc/góc nghiêng MPU6050, thực hiện suy luận học máy cục bộ (TinyML/Edge AI) với độ trễ cực thấp (32ms), và sẽ giao tiếp qua WiFi/4G LTE để cảnh báo khẩn cấp (MQTT).
+Hệ thống giám sát vận động (HAR) và phát hiện té ngã trên thiết bị đeo, sử dụng vi điều khiển **Seeed Studio XIAO ESP32S3** (8MB PSRAM/Flash). Hệ thống tích hợp cảm biến gia tốc/góc nghiêng MPU6050, thực hiện suy luận học máy cục bộ (TinyML/Edge AI) với độ trễ cực thấp (32ms), giao tiếp qua WiFi và 4G LTE (A7680C) để đẩy dữ liệu (Telemetry) và cảnh báo khẩn cấp (Alert) qua giao thức MQTT.
 
-## Lịch Sử và Kế Hoạch Triển Khai (Implementation Roadmap)
-
-### Các Phase Đã Hoàn Thành
-*   **Phase 0 (Init & Prototyping)**: Giai đoạn sơ khai kiểm thử phần cứng. Xây dựng hai file mã nguồn nguyên khối (legacy code) là `esp32s3_wifi_mqtt.c` và `esp32s3_mpu6050.c` dùng để viết nháp và test driver cho cảm biến MPU6050 cũng như các kết nối cơ bản WiFi, MQTT. Đây là bước đệm quan trọng trước khi toàn bộ dự án được "đập đi xây lại" theo kiến trúc phân tách Component.
-*   **Phase 1 (FSM Skeleton)**: Xây dựng Bộ não trung tâm. Định nghĩa máy trạng thái hữu hạn `sys_manager` (FSM) và hệ thống Event Loop (`SYS_EVENT`, `NET_EVENT`, v.v.) để làm luồng giao tiếp chính cho các task.
-*   **Phase 2 (Connectivity)**: Phân tách Hạ tầng Mạng & MQTT. Tách code nguyên khối thành hai service độc lập `svc_network` (quản lý kết nối vật lý) và `svc_cloud` (quản lý giao thức MQTT).
-*   **Phase 3 (Data Collection)**: Xây dựng luồng thu thập dữ liệu IMU. Tích hợp MPU6050, lấy mẫu chính xác 100Hz dùng PCNT hardware ngắt tự động, lọc nhiễu bằng Kalman 1D cho 6 trục và Kalman 2 trạng thái cho góc tư thế (`lib_kalman`), và thiết lập cơ chế gom Batch để đẩy dữ liệu IMU đã tiền xử lý (đổi hệ trục + lọc Kalman + chuẩn hóa, đồng nhất với luồng inference) lên MQTT phục vụ thu thập Dataset train model.
-*   **Phase 4 (Edge AI & Alert - Hiện tại)**: Tích hợp TinyML chạy mô hình AI trực tiếp trên thiết bị (Edge AI). Cấu hình PSRAM OPI 80MHz & ESP-NN, đưa thời gian suy luận xuống 32ms cực kỳ mượt mà. Hoàn thành logic trượt cửa sổ dữ liệu (Sliding Window) và tính toán tư thế tại `svc_ai`.
-
-### Kế Hoạch Sắp Tới (Upcoming Phases)
-*   **Phase 4.1 (AI Logic + MQTT Alert)**: Ghép nối cờ báo động từ `svc_ai` vào `sys_manager` để lập tức kích hoạt bản tin MQTT SOS (Fall Detected) trên `svc_cloud` kèm thời gian delay (cooldown).
-*   **Phase 4.2 (Tiết kiệm điện - Light Sleep)**: Chuyển cấu hình Clock (I2C/PCNT) sang XTAL/RTC, cấu hình Automatic Light Sleep (Tickless Idle) để ESP32-S3 tự động ngủ sau mỗi nhịp báo cáo giúp tối đa hóa thời lượng pin.
-*   **Phase 5 (4G LTE Integration)**: Bổ sung module SIM A7680C qua UART, chuyển đổi `svc_network` sang dùng kết nối PPP (LwIP) để thiết bị hoạt động độc lập không cần WiFi.
-*   **Phase 5.1 (OTA Updates)**: Triển khai khả năng nâng cấp firmware từ xa (Over-The-Air) qua hạ tầng mạng 4G LTE.
+## Các Tính Năng Cốt Lõi (Core Features)
+- **Kiến trúc Sự kiện (Event-Driven FSM)**: Quản lý vòng đời hoạt động bằng máy trạng thái hữu hạn, giao tiếp liên luồng qua `esp_event` và FreeRTOS `xQueue`. Tự động phục hồi lỗi (Watchdog, Hardware Error Reboot).
+- **Thu thập dữ liệu MPU6050 (100Hz)**: Đọc FIFO bằng ngắt cứng PCNT, tự động xử lý trôi lệch (drift) và xả tràn (overflow). Bộ lọc Kalman 1D và 2-state ước lượng tư thế Roll.
+- **TinyML Edge AI (ESP-NN)**: Tích hợp TensorFlow Lite Micro chạy mô hình INT8 (CNN 1D). Kỹ thuật trượt cửa sổ dữ liệu liên tục 0.5s/2s cho phép nhận diện 5 lớp hoạt động (Walk, Run, Idle, Trans, Fall).
+- **Chống Báo Động Giả (False Alarm Gating)**:
+  - **Pre-Impact Posture Gating**: Tự động từ chối cú ngã nếu thiết bị không đeo trên người (ví dụ: đang nằm bẹp trên bàn >3s bị va đập).
+  - **Post-Impact Confirmation FSM**: Chờ 4s sau cú ngã để quan sát sự phục hồi tư thế. Chỉ báo động nếu người dùng hoàn toàn nằm bất động, hủy báo động nếu tự đứng lên được.
+- **Kết nối linh hoạt (WiFi / 4G LTE)**: Tự động phát hiện module SIM (Auto-detect) qua UART sniff. Giao thức PPP qua LwIP cho mạng Cellular siêu mượt.
+- **Pedometer & Battery Monitor**: Đếm số bước đi bộ/chạy độc lập dựa trên tín hiệu AI. Đo pin dùng bảng tra (LUT), lọc Median, EMA và logic tuyến tính hóa đơn điệu (Monotonic) chống nhảy % pin.
 
 ## Cấu Trúc Mã Nguồn (Components)
 Hệ thống áp dụng mô hình phân tách **Service - Driver**:
-- Các `drv_` giao tiếp trực tiếp phần cứng, không in log nghiệp vụ.
-- Các `svc_` xử lý logic nghiệp vụ trung tâm, in log hệ thống, quản lý FreeRTOS tasks.
-- Các `lib_` chứa các thuật toán tính toán toán học độc lập (platform-independent).
+- Các `drv_` giao tiếp trực tiếp phần cứng, không chứa log nghiệp vụ (VD: `drv_mpu6050`, `drv_a7680c`, `drv_battery`).
+- Các `svc_` xử lý logic nghiệp vụ trung tâm, in log hệ thống, quản lý FreeRTOS tasks (VD: `sys_manager`, `svc_network`, `svc_cloud`, `svc_imu`, `svc_ai`).
+- Các `lib_` chứa thuật toán toán học/xử lý tín hiệu độc lập không phụ thuộc platform (VD: `lib_kalman`, `lib_pedometer`).
 
-Vui lòng xem `README.md` trong từng thư mục con thuộc mục `components/` để nắm rõ nguyên lý hoạt động của từng module.
+> *Vui lòng tham khảo các tệp kiến trúc trong `datn_agent_skills/project_setup/architecture` hoặc các tệp `README.md` bên trong từng thư mục con để xem chi tiết.*

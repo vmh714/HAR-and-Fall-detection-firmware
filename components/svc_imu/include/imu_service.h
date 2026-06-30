@@ -60,4 +60,16 @@ void imu_service_register_batch_callback(imu_batch_callback_t cb);
  */
 void imu_service_get_steps(uint32_t *walk, uint32_t *run);
 
+typedef struct {
+    int64_t ts_us;
+    float peak_g;
+    bool had_freefall;
+} imu_impact_info_t;
+
+/**
+ * @brief Lấy thông tin cú va chạm (impact) gần nhất được ghi nhận.
+ * @param out Con trỏ cấu trúc nhận dữ liệu va chạm.
+ */
+void imu_service_get_last_impact(imu_impact_info_t *out);
+
 #endif // IMU_SERVICE_H

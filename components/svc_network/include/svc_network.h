@@ -32,7 +32,7 @@ typedef struct {
     int uart_port;     ///< Cổng UART nối module (vd UART_NUM_2).
     int tx_pin;        ///< Chân TX (ESP -> module).
     int rx_pin;        ///< Chân RX (module -> ESP).
-    int pwrkey_pin;    ///< Chân PWRKEY điều khiển nguồn module.
+    int rst_pin;       ///< Chân RST điều khiển reset module.
 } svc_network_cellular_cfg_t;
 
 /**
@@ -44,5 +44,17 @@ typedef struct {
  * (AT+CNMP=38) rồi chuyển sang chế độ DATA. Khi nhận IP sẽ phát NET_EVT_CELLULAR_CONNECTED.
  */
 esp_err_t svc_network_init_cellular(const svc_network_cellular_cfg_t *cfg);
+
+/**
+ * @brief Đặt chu kỳ đo RSSI 4G.
+ * @param ms Chu kỳ tính bằng milli-giây. 0 = tắt hẳn. Giá trị khác 0 sẽ bị clamp tối thiểu 60000 ms.
+ */
+void svc_network_set_rssi_interval_ms(uint32_t ms);
+
+/**
+ * @brief Lấy chu kỳ đo RSSI 4G hiện tại.
+ * @return Chu kỳ (milli-giây). 0 nếu đang tắt.
+ */
+uint32_t svc_network_get_rssi_interval_ms(void);
 
 #endif // SVC_NETWORK_H

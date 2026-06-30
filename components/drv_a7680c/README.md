@@ -1,18 +1,31 @@
 # Component: drv_a7680c
 
-## Tổng Quan
-Tầng điều khiển **nguồn** (power control) cho module 4G LTE A7680C. Driver chỉ lo bật/tắt module qua chân **PWRKEY** (GPIO thuần), **không** đụng tới UART/AT command — phần giao tiếp dữ liệu và PPPoS do tầng trên (`esp_modem` trong `svc_network`) đảm nhiệm. Việc tách lớp giúp driver chỉ chịu trách nhiệm phần cứng, không chứa business logic.
+> **Cập nhật cuối (Timestamp):** 2026-06-30
+> **Trạng thái:** Hoạt động ổn định (No-op RST)
 
-Driver phụ thuộc `driver/gpio.h` (xem `include/drv_a7680c.h`).
+---
 
-## Public API
-- **`void drv_a7680c_init(gpio_num_t pwrkey_pin)`**: cấu hình chân PWRKEY thành output, tắt pull/ngắt, đặt mức nghỉ (cao). Lưu chân vào biến static. Pin thực tế truyền từ `hardware_config.h` (`A7680C_PWRKEY_PIN = GPIO_NUM_38`).
-- **`esp_err_t drv_a7680c_power_on(void)`**: phát xung PWRKEY mức thấp **~100ms** (Ton typ. 50ms theo datasheet A7680C) rồi nhả về cao. Sau khi gọi cần chờ ~5–10s cho module boot xong UART. Trả `ESP_ERR_INVALID_STATE` nếu chưa init.
-- **`esp_err_t drv_a7680c_power_off(void)`**: phát xung PWRKEY mức thấp **≥2.5s** (Toff min) để tắt module. Phải chờ **≥2s** (Toff-on) trước khi bật lại.
+## 1. PUBLIC API
 
-> ⚠️ **Cực tính phụ thuộc board.** Mã giả định PWRKEY active-low (mức cao = nghỉ, xung thấp = kích). Nếu board đảo mức thì hoán đổi 0/1 trong `drv_a7680c.c`. Timing đã theo datasheet A7680C (Ton ~50ms, Toff ≥2.5s, Toff-on ≥2s) — xem `atcommand.md`.
+- **`void drv_a7680c_init(gpio_num_t rst_pin)`**: Cấu hình chân RST nối tới module thành output. Việc thiết lập mức cao (idle) bị bỏ qua để tránh sự cố sập nguồn của module.
+- **`esp_err_t drv_a7680c_reset(bool *did_reset)`**: No-op (chỉ ghi log cảnh báo và gán `*did_reset = false`). Quyết định không can thiệp vào chân RST được chốt để đảm bảo hoạt động ổn định của module 4G.
+- **`esp_err_t drv_a7680c_emergency_mqtt_publish(void *dce_ptr, const char *broker, const char *topic, const char *payload)`**: Sử dụng `esp_modem_at` để gửi bản tin MQTT trực tiếp qua tập lệnh AT nội bộ (`AT+CMQTT...`) của A7680C. Thường dùng khi PPP/HDLC interface bị hỏng nhưng tầng AT command vẫn phản hồi, giúp thiết bị gửi cảnh báo cuối cùng trước khi tự reset.
 
-## Quan hệ với PPPoS (svc_network)
-`drv_a7680c` chỉ bật nguồn module. Toàn bộ AT command (gồm `AT+CNMP=38` khóa LTE-only), cấu hình PDP/APN, dial PPP và netif do `svc_network_init_cellular()` thực hiện qua `esp_modem`. Xem `protocol.md` và `system_integration.md`.
+---
 
-> **Cập nhật cuối (Timestamp):** 2026-06-17
+## 2. Mục đích (Purpose / Why)
+Tầng điều khiển phần cứng cho module 4G LTE A7680C. 
+Thay vì bao gồm toàn bộ stack mạng (vốn đã được `svc_network` lo liệu thông qua `esp_modem`), module này chỉ tập trung vào việc quản lý phần cứng vật lý (các chân RST, PWRKEY) và cung cấp các tập lệnh AT khẩn cấp (Emergency AT Commands) khi PPPoS bị sập.
+
+## 3. Cơ chế cốt lõi (How it works)
+* **Khởi động tự động (Auto-Power-On):** Do mạch thực tế không nối dây PWRKEY vào MCU, module 4G được cấu hình bằng phần cứng để tự bật lên ngay khi có điện. MCU không cần (và không thể) điều khiển việc bật tắt này.
+* **No-op Reset (Vô hiệu hóa reset cứng):** Trong thực tế, chạm vào chân RST sẽ khiến module A7680C tắt nguồn hẳn mà không tự khởi động lại được (xem quyết định thiết kế `D-019`). Do đó, module cố tình thiết kế hàm `drv_a7680c_reset()` thành **No-op** (không làm gì cả, chỉ ghi log) để bảo vệ hệ thống khỏi việc sập mạng vĩnh viễn.
+* **Gửi MQTT Khẩn cấp (Emergency Publish):** Khi kết nối PPP (internet ảo) bị lỗi nhưng cổng Serial UART nối với A7680C vẫn sống, driver cung cấp luồng đi "cửa sau". Nó bỏ qua PPP và bắn trực tiếp các lệnh AT (`AT+CMQTT...`) xuống thẳng module 4G để nhờ module 4G tự kết nối MQTT và gửi cảnh báo cuối cùng (last-gasp) trước khi ESP32 tự khởi động lại.
+
+## 4. Đa nhiệm & Tài nguyên (Concurrency & Resources)
+* Hoàn toàn đồng bộ (Synchronous), không tạo bất kỳ Task nào. 
+* Lệnh khẩn cấp `emergency_mqtt_publish` khóa UART mutex nội bộ của `esp_modem` để đảm bảo không đụng độ với các luồng đang cố đọc AT Command khác.
+
+## 5. Luồng giao tiếp (Data Flow)
+* **Input / Output:** Giao tiếp trực tiếp qua tập lệnh AT thông qua UART. 
+* **Tương quan với svc_network:** `drv_a7680c` nằm ở dưới cùng. Toàn bộ phần quay số PPPoS, cấu hình APN, khóa mạng LTE (`AT+CNMP=38`) đều diễn ra ở tầng trên `svc_network`. Tầng trên chỉ gọi xuống driver này để thao tác chân phần cứng hoặc kích hoạt mode khẩn cấp.

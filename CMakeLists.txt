@@ -3,4 +3,4 @@
 cmake_minimum_required(VERSION 3.16)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(esp32s3_mpu6050)
+project(har_fall_eldercare VERSION 1.0.0)

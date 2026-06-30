@@ -12,7 +12,7 @@
 
 static const char* TAG = "TFLiteWrapper";
 
-static volatile float s_fall_threshold = 0.6f;
+static volatile float s_fall_threshold = 0.25f;
 
 namespace {
 const tflite::Model* model = nullptr;

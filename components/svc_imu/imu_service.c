@@ -11,6 +11,7 @@
 #include "svc_ai.h"
 #include "pedometer.h"
 #include "nvs.h"
+#include "esp_timer.h"
 
 static const char *TAG = "IMU_SERVICE";
 static TaskHandle_t imu_task_handle = NULL;
@@ -21,12 +22,22 @@ static float last_roll = 0;
 static imu_window_t imu_win;
 static imu_batch_data_t s_batch_data;
 static imu_batch_callback_t s_batch_callback = NULL;
+static uint8_t s_i2c_consecutive_errors = 0;
 
 #define RAD_TO_DEG 57.2957795131f
 
 // Dải đo thực tế, tính từ accel_ssf/gyro_ssf có sẵn trong mpu6050.h
 static float s_accel_fs_range;
 static float s_gyro_fs_range;
+
+#define FREEFALL_THR_G 0.6f
+#define IMPACT_THR_G 2.5f
+
+static imu_impact_info_t s_latest_impact = {0};
+static bool s_temp_had_freefall = false;
+static int64_t s_temp_freefall_ts = 0;
+static portMUX_TYPE s_impact_mux = portMUX_INITIALIZER_UNLOCKED;
+
 
 /// Pedometer: đếm bước on-device từ accel thô body-frame, gate theo HAR (Walk/Run).
 static pedometer_t s_pedometer;
@@ -35,6 +46,15 @@ static uint32_t s_run_steps = 0;
 static bool s_steps_dirty = false;
 static uint32_t s_batches_since_save = 0;
 #define STEPS_SAVE_PERIOD_BATCHES 120  // ~60s (mỗi batch ~0.5s) → giảm hao mòn NVS
+
+/// Debounce bước: HAR nhầm Trans→Walk chỉ kéo dài 1 cửa sổ (vd "ngồi dậy nhanh") sẽ làm
+/// pedometer cộng bước ảo. Vì vậy chỉ chốt bước khi Walk/Run kéo dài liên tục
+/// ≥ STEPS_CONFIRM_BATCHES cửa sổ. Bước phát hiện trong lúc chờ xác nhận được GIỮ TẠM
+/// (pending); đủ chuỗi → cộng nốt (không mất bước đầu đoạn đi); đứt chuỗi → huỷ (loại flicker).
+#define STEPS_CONFIRM_BATCHES 2   // ~1.0s Walk/Run liên tục mới tính là locomotion thật
+static uint16_t s_locomotion_streak = 0;
+static uint32_t s_pending_walk = 0;
+static uint32_t s_pending_run = 0;
 
 /// Nạp số bước tích lũy đã lưu trong NVS (giữ qua reboot/mất điện).
 static void steps_load_nvs(void)
@@ -80,7 +100,9 @@ static bool IRAM_ATTR pcnt_on_reach(pcnt_unit_handle_t unit, const pcnt_watch_ev
  */
 static void imu_processing_task(void *pvParameters)
 {
-    mpu6050_data_raw_t raw_data[IMU_BATCH_SIZE];
+    // Tăng buffer lên 100 (thay vì IMU_BATCH_SIZE=50) để drain sạch FIFO, 
+    // tránh lỗi tích tụ (drift) giữa PCNT và số mẫu thực tế gây tràn FIFO.
+    mpu6050_data_raw_t raw_data[100];
     uint16_t count;
 
     // Lấy sample rate thực tế từ driver (tránh hằng số cứng)
@@ -93,27 +115,78 @@ static void imu_processing_task(void *pvParameters)
         /// Nếu quá hạn → nghi MPU6050 treo FIFO/INT, reset FIFO và bộ đếm để tự phục hồi.
         uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
         if (notified == 0) {
-            ESP_LOGW(TAG, "Timeout waiting for PCNT interrupt. Possible MPU6050 FIFO/INT hang. Recovering...");
+            s_i2c_consecutive_errors++;
+            ESP_LOGW(TAG, "Timeout waiting for PCNT interrupt. Possible MPU6050 FIFO/INT hang. Recovering... (errors: %d)", s_i2c_consecutive_errors);
+            if (s_i2c_consecutive_errors >= 10) {
+                ESP_LOGE(TAG, "I2C error/timeout threshold reached. Posting SYS_EVT_HARDWARE_ERROR...");
+                esp_event_post(SYS_EVENT, SYS_EVT_HARDWARE_ERROR, NULL, 0, portMAX_DELAY);
+                s_i2c_consecutive_errors = 0; // Chống spam
+            }
             mpu6050_reset_fifo();
             pcnt_unit_clear_count(pcnt_unit);
             continue;
         }
 
-        count = IMU_BATCH_SIZE;
+        count = 100; // Đọc tối đa 100 mẫu để vét sạch FIFO
         // Đọc dữ liệu từ FIFO (Burst Read)
-        if (mpu6050_read_fifo(raw_data, &count) == ESP_OK && count > 0) {
-            bool is_streaming = (sys_manager_get_state() == STATE_STREAMING);
+        esp_err_t err = mpu6050_read_fifo(raw_data, &count);
+        if (err != ESP_OK) {
+            s_i2c_consecutive_errors++;
+            ESP_LOGE(TAG, "Failed to read MPU6050 FIFO (%s). Consecutive errors: %d", esp_err_to_name(err), s_i2c_consecutive_errors);
+            if (s_i2c_consecutive_errors >= 10) {
+                ESP_LOGE(TAG, "I2C error/timeout threshold reached. Posting SYS_EVT_HARDWARE_ERROR...");
+                esp_event_post(SYS_EVENT, SYS_EVT_HARDWARE_ERROR, NULL, 0, portMAX_DELAY);
+                s_i2c_consecutive_errors = 0; // Chống spam
+            }
+            continue;
+        }
+
+        s_i2c_consecutive_errors = 0;
+        if (count > 0) {
+            system_state_t st = sys_manager_get_state();
+            bool is_normal    = (st == STATE_NORMAL);
+            bool is_streaming = (st == STATE_STREAMING);
+            if (!is_normal && !is_streaming) {
+                continue;   // INIT/CONNECTING/OTA: đã drain FIFO, bỏ toàn bộ xử lý nặng
+            }
+
             if (!is_streaming) {
                 s_batch_data.count = 0;
             }
 
-            /// Đọc class HAR mới nhất (cập nhật mỗi 0.5s) để gate + gán nhãn bước cho cả lô.
-            /// Gait đổi chậm nên dùng chung class cho 50 mẫu là đủ chính xác.
-            const char *har_class = svc_ai_get_latest_prediction();
-            bool is_walk = (strcmp(har_class, "Walk") == 0);
-            bool is_run  = (strcmp(har_class, "Run") == 0);
-            /// Trơ theo nhịp: chạy (~200ms) nhanh hơn đi bộ (~300ms).
-            s_pedometer.refractory_samples = (uint32_t)((is_run ? 0.20f : 0.30f) * sample_rate);
+            bool is_walk = false;
+            bool is_run = false;
+            bool steps_confirmed = false;
+
+            if (is_normal) {
+                /// Đọc class HAR mới nhất (cập nhật mỗi 0.5s) để gate + gán nhãn bước cho cả lô.
+                /// Gait đổi chậm nên dùng chung class cho 50 mẫu là đủ chính xác.
+                const char *har_class = svc_ai_get_latest_prediction();
+                is_walk = (strcmp(har_class, "Walk") == 0);
+                is_run  = (strcmp(har_class, "Run") == 0);
+                /// Trơ theo nhịp: chạy (~200ms) nhanh hơn đi bộ (~300ms).
+                s_pedometer.refractory_samples = (uint32_t)((is_run ? 0.20f : 0.30f) * sample_rate);
+
+                /// Debounce: cập nhật chuỗi Walk/Run liên tiếp; đủ ngưỡng → chốt nốt bước pending,
+                /// đứt chuỗi → huỷ pending (loại bước ảo do HAR nhầm 1 cửa sổ, vd "ngồi dậy nhanh").
+                bool is_locomotion = is_walk || is_run;
+                if (is_locomotion) {
+                    if (s_locomotion_streak < 0xFFFF) s_locomotion_streak++;
+                    if (s_locomotion_streak == STEPS_CONFIRM_BATCHES) {
+                        // Vừa đủ xác nhận locomotion thật → cộng nốt các bước đã giữ tạm (không mất bước đầu đoạn đi).
+                        s_walk_steps += s_pending_walk;
+                        s_run_steps  += s_pending_run;
+                        if (s_pending_walk || s_pending_run) s_steps_dirty = true;
+                        s_pending_walk = 0;
+                        s_pending_run  = 0;
+                    }
+                } else {
+                    s_locomotion_streak = 0;
+                    s_pending_walk = 0;
+                    s_pending_run  = 0;
+                }
+                steps_confirmed = (s_locomotion_streak >= STEPS_CONFIRM_BATCHES);
+            }
 
             for (int i = 0; i < count; i++) {
                 mpu6050_data_t processed_data;
@@ -128,16 +201,54 @@ static void imu_processing_task(void *pvParameters)
                 float gy_body = -processed_data.gy;
                 float gz_body = processed_data.gz;
 
-                /// Pedometer ăn accel THÔ body-frame (chưa qua Kalman làm mượt) để giữ
-                /// đỉnh bước rõ; chỉ cộng khi HAR là Walk/Run, gán đúng bộ đếm.
-                if (pedometer_process(&s_pedometer, ax_body, ay_body, az_body)) {
-                    if (is_run)       { s_run_steps++;  s_steps_dirty = true; }
-                    else if (is_walk) { s_walk_steps++; s_steps_dirty = true; }
-                }
+                if (is_normal) {
+                    // Tính toán SVM, theo dõi free-fall và impact thô per-sample
+                    int64_t now_us = esp_timer_get_time();
+                    int64_t sample_ts = now_us - (count - 1 - i) * (1000000 / sample_rate);
 
-                /// Roll xác định tư thế (nằm/đứng/ngồi) — hợp với mounting thắt lưng phía trước.
-                float accel_roll = atan2(ay_body, sqrt(ax_body * ax_body + az_body * az_body)) * RAD_TO_DEG;
-                last_roll = kalman_get_angle(&kal_roll, accel_roll, gx_body, dt);
+                    float svm = sqrtf(ax_body * ax_body + ay_body * ay_body + az_body * az_body);
+                    if (svm < FREEFALL_THR_G) {
+                        s_temp_had_freefall = true;
+                        s_temp_freefall_ts = sample_ts;
+                    }
+                    if (s_temp_had_freefall && (sample_ts - s_temp_freefall_ts > 500000)) {
+                        s_temp_had_freefall = false;
+                    }
+                    if (svm > IMPACT_THR_G) {
+                        portENTER_CRITICAL(&s_impact_mux);
+                        if (sample_ts - s_latest_impact.ts_us < 100000) {
+                            if (svm > s_latest_impact.peak_g) {
+                                s_latest_impact.peak_g = svm;
+                                s_latest_impact.ts_us = sample_ts;
+                            }
+                            if (s_temp_had_freefall) {
+                                s_latest_impact.had_freefall = true;
+                            }
+                        } else {
+                            s_latest_impact.ts_us = sample_ts;
+                            s_latest_impact.peak_g = svm;
+                            s_latest_impact.had_freefall = s_temp_had_freefall;
+                        }
+                        portEXIT_CRITICAL(&s_impact_mux);
+                    }
+
+                    /// Pedometer ăn accel THÔ body-frame (chưa qua Kalman làm mượt) để giữ
+                    /// đỉnh bước rõ; chỉ cộng khi HAR là Walk/Run, gán đúng bộ đếm.
+                    if (pedometer_process(&s_pedometer, ax_body, ay_body, az_body)) {
+                        /// Đã xác nhận locomotion → cộng thẳng; chưa → giữ tạm chờ debounce xác nhận.
+                        if (steps_confirmed) {
+                            if (is_run)       { s_run_steps++;  s_steps_dirty = true; }
+                            else if (is_walk) { s_walk_steps++; s_steps_dirty = true; }
+                        } else {
+                            if (is_run)       s_pending_run++;
+                            else if (is_walk) s_pending_walk++;
+                        }
+                    }
+
+                    /// Roll xác định tư thế (nằm/đứng/ngồi) — hợp với mounting thắt lưng phía trước.
+                    float accel_roll = atan2(ay_body, sqrt(ax_body * ax_body + az_body * az_body)) * RAD_TO_DEG;
+                    last_roll = kalman_get_angle(&kal_roll, accel_roll, gx_body, dt);
+                }
 
                 /// Lọc Kalman 1D từng trục IMU rồi chuẩn hóa về (-1, 1):
                 /// tiền xử lý bắt buộc để dữ liệu khớp với input của model TinyML đã quantize INT8.
@@ -187,7 +298,7 @@ static void imu_processing_task(void *pvParameters)
 
             // Gửi RingBuffer cho svc_ai sau mỗi lô 50 mẫu (Slide Window 0.5s)
             // Việc này chạy song song với streaming (nếu có). Ở STATE_NORMAL, AI vẫn hoạt động.
-            if (sys_manager_get_state() == STATE_NORMAL || sys_manager_get_state() == STATE_STREAMING) {
+            if (is_normal) {
                 // Ta gọi svc_ai_process_window() ở đây vì `count` đọc từ FIFO luôn bằng IMU_BATCH_SIZE (50)
                 // Vậy cứ qua vòng lặp xử lý 50 mẫu, ta gửi window 1 lần (Trượt 0.5s)
                 svc_ai_process_window(&imu_win);
@@ -195,9 +306,11 @@ static void imu_processing_task(void *pvParameters)
 
             /// Lưu số bước vào NVS định kỳ (~60s), chỉ khi có thay đổi → bền qua reboot
             /// mà không làm mòn flash.
-            if (++s_batches_since_save >= STEPS_SAVE_PERIOD_BATCHES) {
-                s_batches_since_save = 0;
-                if (s_steps_dirty) { steps_save_nvs(); s_steps_dirty = false; }
+            if (is_normal) {
+                if (++s_batches_since_save >= STEPS_SAVE_PERIOD_BATCHES) {
+                    s_batches_since_save = 0;
+                    if (s_steps_dirty) { steps_save_nvs(); s_steps_dirty = false; }
+                }
             }
 
             // In log mỗi khi xử lý xong một batch (0.5s)
@@ -217,7 +330,7 @@ esp_err_t imu_service_init(gpio_num_t int_pin)
     // 1. Cấu hình MPU6050 (tập trung tại đây, không hardcode ngoài app_main)
     mpu6050_config_t imu_cfg = {
         .accel_fs = ACCEL_FS_8G,
-        .gyro_fs = GYRO_FS_2000DPS,
+        .gyro_fs = GYRO_FS_500DPS,
         .dlpf_cfg = DLPF_CFG_21HZ,
         .sample_rate_hz = 100,
         .pwr_cfg = { .temp_disable = true },
@@ -356,4 +469,13 @@ void imu_service_get_steps(uint32_t *walk, uint32_t *run)
 {
     if (walk) *walk = s_walk_steps;
     if (run)  *run = s_run_steps;
+}
+
+void imu_service_get_last_impact(imu_impact_info_t *out)
+{
+    if (out) {
+        portENTER_CRITICAL(&s_impact_mux);
+        *out = s_latest_impact;
+        portEXIT_CRITICAL(&s_impact_mux);
+    }
 }
